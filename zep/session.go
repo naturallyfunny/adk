@@ -109,6 +109,9 @@ func (s *SessionService) AppendEvent(ctx context.Context, sess session.Session, 
 			}
 		}
 	}
+	if contentStr == "" {
+		return nil
+	}
 
 	msg := &zep.Message{
 		Role:    zepRole,
@@ -182,6 +185,10 @@ func (s *SessionService) fetchKnowledge(ctx context.Context, sessionID string, t
 		TemplateID: templateID,
 	})
 	if err != nil {
+		var notFound *zep.NotFoundError
+		if errors.As(err, &notFound) {
+			return "", nil
+		}
 		return "", err
 	}
 

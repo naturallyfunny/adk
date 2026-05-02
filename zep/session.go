@@ -160,11 +160,7 @@ func (s *SessionService) buildContext(ctx context.Context, sessionID string) ([]
 	var events []*session.Event
 
 	if s.includeKnowledge {
-		knowledge, err := s.fetchKnowledge(ctx, sessionID, s.knowledgeContextTemplate)
-		if err != nil {
-			return nil, err
-		}
-		if knowledge != "" {
+		if knowledge := s.fetchKnowledge(ctx, sessionID, s.knowledgeContextTemplate); knowledge != "" {
 			events = append(events, s.newSystemEvent("knowledge", knowledge))
 		}
 	}
@@ -180,28 +176,24 @@ func (s *SessionService) buildContext(ctx context.Context, sessionID string) ([]
 	return events, nil
 }
 
-func (s *SessionService) fetchKnowledge(ctx context.Context, sessionID string, templateID *string) (string, error) {
+func (s *SessionService) fetchKnowledge(ctx context.Context, sessionID string, templateID *string) string {
 	resp, err := s.client.Thread.GetUserContext(ctx, sessionID, &zep.ThreadGetUserContextRequest{
 		TemplateID: templateID,
 	})
 	if err != nil {
-		var notFound *zep.NotFoundError
-		if errors.As(err, &notFound) {
-			return "", nil
-		}
-		return "", err
+		return ""
 	}
 
 	if resp == nil || resp.GetContext() == nil {
-		return "", nil
+		return ""
 	}
 
 	ctxStr := *resp.GetContext()
 	if ctxStr == "" {
-		return "", nil
+		return ""
 	}
 
-	return fmt.Sprintf("[KNOWLEDGE]\n%s\n[/KNOWLEDGE]", ctxStr), nil
+	return fmt.Sprintf("[KNOWLEDGE]\n%s\n[/KNOWLEDGE]", ctxStr)
 }
 
 func (s *SessionService) fetchHistory(ctx context.Context, sessionID string) ([]*session.Event, error) {

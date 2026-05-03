@@ -99,7 +99,12 @@ func (s *SessionService) AppendEvent(ctx context.Context, sess session.Session, 
 		return nil
 	}
 
-	zepRole := s.mapRoleToZep(event.Author)
+	// Always update in-memory state: the ADK flow loop reads sess.Events() on
+	// every iteration, so function-call and function-response events must be
+	// visible even though they carry no text and are not persisted to Zep.
+	if impl, ok := sess.(*zepSession); ok {
+		impl.events = append(impl.events, event)
+	}
 
 	var contentStr string
 	if event.Content != nil {
@@ -112,6 +117,8 @@ func (s *SessionService) AppendEvent(ctx context.Context, sess session.Session, 
 	if contentStr == "" {
 		return nil
 	}
+
+	zepRole := s.mapRoleToZep(event.Author)
 
 	msg := &zep.Message{
 		Role:    zepRole,
@@ -128,15 +135,7 @@ func (s *SessionService) AppendEvent(ctx context.Context, sess session.Session, 
 	_, err := s.client.Thread.AddMessages(ctx, sess.ID(), &zep.AddThreadMessagesRequest{
 		Messages: []*zep.Message{msg},
 	})
-	if err != nil {
-		return err
-	}
-
-	if impl, ok := sess.(*zepSession); ok {
-		impl.events = append(impl.events, event)
-	}
-
-	return nil
+	return err
 }
 
 func (s *SessionService) Get(ctx context.Context, req *session.GetRequest) (*session.GetResponse, error) {

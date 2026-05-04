@@ -64,7 +64,12 @@ func (m *openAIModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 	if modelName == "" {
 		modelName = m.name
 	}
-	params := m.buildParams(modelName, req)
+	params, err := m.buildParams(modelName, req)
+	if err != nil {
+		return func(yield func(*model.LLMResponse, error) bool) {
+			yield(nil, err)
+		}
+	}
 	if stream {
 		return m.generateStream(ctx, params)
 	}
@@ -72,7 +77,7 @@ func (m *openAIModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 }
 
 // buildParams assembles the OpenAI request parameters from the ADK request.
-func (m *openAIModel) buildParams(modelName string, req *model.LLMRequest) oai.ChatCompletionNewParams {
+func (m *openAIModel) buildParams(modelName string, req *model.LLMRequest) (oai.ChatCompletionNewParams, error) {
 	var msgs []oai.ChatCompletionMessageParamUnion
 
 	// System instruction is prepended as a system-role message.
@@ -82,7 +87,11 @@ func (m *openAIModel) buildParams(modelName string, req *model.LLMRequest) oai.C
 		}
 	}
 
-	msgs = append(msgs, contentsToMessages(req.Contents)...)
+	contentMsgs, err := contentsToMessages(req.Contents)
+	if err != nil {
+		return oai.ChatCompletionNewParams{}, err
+	}
+	msgs = append(msgs, contentMsgs...)
 
 	params := oai.ChatCompletionNewParams{
 		Model:    shared.ChatModel(modelName),
@@ -90,7 +99,7 @@ func (m *openAIModel) buildParams(modelName string, req *model.LLMRequest) oai.C
 	}
 
 	if req.Config == nil {
-		return params
+		return params, nil
 	}
 
 	if req.Config.Temperature != nil {
@@ -114,15 +123,19 @@ func (m *openAIModel) buildParams(modelName string, req *model.LLMRequest) oai.C
 	if len(req.Config.StopSequences) > 0 {
 		stop := req.Config.StopSequences
 		if len(stop) > 4 {
-			stop = stop[:4] // OpenAI accepts at most 4 stop sequences.
+			stop = slices.Clone(stop[:4]) // OpenAI accepts at most 4 stop sequences.
 		}
 		params.Stop.OfStringArray = stop
 	}
-	if tools := declarationsToTools(req.Config.Tools); len(tools) > 0 {
+	tools, err := declarationsToTools(req.Config.Tools)
+	if err != nil {
+		return oai.ChatCompletionNewParams{}, err
+	}
+	if len(tools) > 0 {
 		params.Tools = tools
 	}
 
-	return params
+	return params, nil
 }
 
 // generate performs a non-streaming Chat Completions call.
@@ -137,7 +150,12 @@ func (m *openAIModel) generate(ctx context.Context, params oai.ChatCompletionNew
 			yield(nil, fmt.Errorf("openai: empty response"))
 			return
 		}
-		yield(completionToLLMResponse(resp), nil)
+		llmResp, err := completionToLLMResponse(resp)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		yield(llmResp, nil)
 	}
 }
 
@@ -147,6 +165,9 @@ func (m *openAIModel) generate(ctx context.Context, params oai.ChatCompletionNew
 // incremental output.  After the stream ends a single final, non-Partial
 // response carrying the fully assembled content is yielded.
 func (m *openAIModel) generateStream(ctx context.Context, params oai.ChatCompletionNewParams) iter.Seq2[*model.LLMResponse, error] {
+	params.StreamOptions = oai.F(oai.ChatCompletionStreamOptionsParam{
+		IncludeUsage: oai.Bool(true),
+	})
 	return func(yield func(*model.LLMResponse, error) bool) {
 		stream := m.client.Chat.Completions.NewStreaming(ctx, params)
 		defer stream.Close()
@@ -156,12 +177,16 @@ func (m *openAIModel) generateStream(ctx context.Context, params oai.ChatComplet
 			toolAccums   = make(map[int64]*toolCallAccum)
 			finishReason string
 			modelVersion string
+			usage        oai.CompletionUsage
 		)
 
 		for stream.Next() {
 			chunk := stream.Current()
 			if modelVersion == "" {
 				modelVersion = chunk.Model
+			}
+			if chunk.Usage.TotalTokens > 0 {
+				usage = chunk.Usage
 			}
 			if len(chunk.Choices) == 0 {
 				continue
@@ -207,7 +232,12 @@ func (m *openAIModel) generateStream(ctx context.Context, params oai.ChatComplet
 			return
 		}
 
-		yield(buildFinalStreamResponse(textBuf.String(), toolAccums, finishReason, modelVersion), nil)
+		final, err := buildFinalStreamResponse(textBuf.String(), toolAccums, finishReason, modelVersion, usage)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		yield(final, nil)
 	}
 }
 
@@ -220,7 +250,7 @@ type toolCallAccum struct {
 
 // buildFinalStreamResponse assembles the complete, non-Partial LLMResponse
 // after all streaming chunks have been processed.
-func buildFinalStreamResponse(text string, toolAccums map[int64]*toolCallAccum, finishReason, modelVersion string) *model.LLMResponse {
+func buildFinalStreamResponse(text string, toolAccums map[int64]*toolCallAccum, finishReason, modelVersion string, usage oai.CompletionUsage) (*model.LLMResponse, error) {
 	var parts []*genai.Part
 	if text != "" {
 		parts = append(parts, &genai.Part{Text: text})
@@ -234,9 +264,9 @@ func buildFinalStreamResponse(text string, toolAccums map[int64]*toolCallAccum, 
 
 	for _, idx := range indices {
 		acc := toolAccums[idx]
-		var args map[string]any
-		if acc.argsJSON != "" {
-			_ = json.Unmarshal([]byte(acc.argsJSON), &args)
+		args, err := unmarshalArgs(acc.argsJSON)
+		if err != nil {
+			return nil, err
 		}
 		parts = append(parts, &genai.Part{
 			FunctionCall: &genai.FunctionCall{
@@ -252,19 +282,27 @@ func buildFinalStreamResponse(text string, toolAccums map[int64]*toolCallAccum, 
 		content = &genai.Content{Role: genai.RoleModel, Parts: parts}
 	}
 
-	return &model.LLMResponse{
+	resp := &model.LLMResponse{
 		Content:      content,
 		FinishReason: mapFinishReason(finishReason),
 		ModelVersion: modelVersion,
 		TurnComplete: true,
 	}
+	if usage.TotalTokens > 0 {
+		resp.UsageMetadata = &genai.GenerateContentResponseUsageMetadata{
+			PromptTokenCount:     int32(usage.PromptTokens),
+			CandidatesTokenCount: int32(usage.CompletionTokens),
+			TotalTokenCount:      int32(usage.TotalTokens),
+		}
+	}
+	return resp, nil
 }
 
 // contentsToMessages converts the ADK conversation history to OpenAI messages.
 //
 // A single genai user Content may expand into multiple OpenAI messages because
 // OpenAI requires each function response to be its own tool-role message.
-func contentsToMessages(contents []*genai.Content) []oai.ChatCompletionMessageParamUnion {
+func contentsToMessages(contents []*genai.Content) ([]oai.ChatCompletionMessageParamUnion, error) {
 	var msgs []oai.ChatCompletionMessageParamUnion
 	for _, c := range contents {
 		if c == nil {
@@ -272,19 +310,26 @@ func contentsToMessages(contents []*genai.Content) []oai.ChatCompletionMessagePa
 		}
 		switch c.Role {
 		case genai.RoleUser:
-			msgs = append(msgs, userContentToMessages(c)...)
+			userMsgs, err := userContentToMessages(c)
+			if err != nil {
+				return nil, err
+			}
+			msgs = append(msgs, userMsgs...)
 		case genai.RoleModel:
 			msgs = append(msgs, modelContentToMessage(c))
+		default:
+			// Unknown roles are silently skipped. Future roles added to genai
+			// will not cause a hard failure but will not be mapped either.
 		}
 	}
-	return msgs
+	return msgs, nil
 }
 
 // userContentToMessages converts a user-role genai.Content into one or more
 // OpenAI messages.  Text parts are coalesced into a single user message.
 // FunctionResponse parts each become a separate tool-role message, with any
 // preceding text flushed first.
-func userContentToMessages(c *genai.Content) []oai.ChatCompletionMessageParamUnion {
+func userContentToMessages(c *genai.Content) ([]oai.ChatCompletionMessageParamUnion, error) {
 	var msgs []oai.ChatCompletionMessageParamUnion
 	var textBuf strings.Builder
 
@@ -299,15 +344,18 @@ func userContentToMessages(c *genai.Content) []oai.ChatCompletionMessageParamUni
 		if part == nil {
 			continue
 		}
-		if part.FunctionResponse != nil {
+		switch {
+		case part.FunctionResponse != nil:
 			flushText()
 			msgs = append(msgs, functionResponseToToolMessage(part.FunctionResponse))
-		} else if part.Text != "" {
+		case part.Text != "":
 			textBuf.WriteString(part.Text)
+		default:
+			return nil, fmt.Errorf("openai: unsupported part type in user content")
 		}
 	}
 	flushText()
-	return msgs
+	return msgs, nil
 }
 
 // functionResponseToToolMessage converts a genai FunctionResponse to an
@@ -349,7 +397,8 @@ func modelContentToMessage(c *genai.Content) oai.ChatCompletionMessageParamUnion
 		} else if part.FunctionCall != nil {
 			b, _ := json.Marshal(part.FunctionCall.Args)
 			toolCalls = append(toolCalls, oai.ChatCompletionMessageToolCallParam{
-				ID: part.FunctionCall.ID,
+				ID:   part.FunctionCall.ID,
+				Type: oai.ChatCompletionMessageToolCallTypeFunction,
 				Function: oai.ChatCompletionMessageToolCallFunctionParam{
 					Name:      part.FunctionCall.Name,
 					Arguments: string(b),
@@ -369,7 +418,7 @@ func modelContentToMessage(c *genai.Content) oai.ChatCompletionMessageParamUnion
 }
 
 // declarationsToTools converts genai tool definitions to OpenAI tool params.
-func declarationsToTools(tools []*genai.Tool) []oai.ChatCompletionToolParam {
+func declarationsToTools(tools []*genai.Tool) ([]oai.ChatCompletionToolParam, error) {
 	var result []oai.ChatCompletionToolParam
 	for _, t := range tools {
 		if t == nil {
@@ -380,6 +429,7 @@ func declarationsToTools(tools []*genai.Tool) []oai.ChatCompletionToolParam {
 				continue
 			}
 			toolParam := oai.ChatCompletionToolParam{
+				Type: oai.ChatCompletionToolTypeFunction,
 				Function: shared.FunctionDefinitionParam{
 					Name: fd.Name,
 				},
@@ -388,46 +438,55 @@ func declarationsToTools(tools []*genai.Tool) []oai.ChatCompletionToolParam {
 				toolParam.Function.Description = oai.String(fd.Description)
 			}
 			if fd.Parameters != nil {
-				toolParam.Function.Parameters = schemaToFunctionParams(fd.Parameters)
+				fnParams, err := schemaToFunctionParams(fd.Parameters)
+				if err != nil {
+					return nil, err
+				}
+				toolParam.Function.Parameters = fnParams
 			}
 			result = append(result, toolParam)
 		}
 	}
-	return result
+	return result, nil
 }
 
 // schemaToFunctionParams converts a genai Schema to the OpenAI FunctionParameters
 // map by round-tripping through JSON.
-func schemaToFunctionParams(s *genai.Schema) shared.FunctionParameters {
+func schemaToFunctionParams(s *genai.Schema) (shared.FunctionParameters, error) {
 	b, err := json.Marshal(s)
 	if err != nil {
-		return shared.FunctionParameters{}
+		return shared.FunctionParameters{}, fmt.Errorf("openai: marshal schema: %w", err)
 	}
 	var m map[string]any
 	if err := json.Unmarshal(b, &m); err != nil {
-		return shared.FunctionParameters{}
+		return shared.FunctionParameters{}, fmt.Errorf("openai: unmarshal schema: %w", err)
 	}
-	return shared.FunctionParameters(m)
+	return shared.FunctionParameters(m), nil
 }
 
 // completionToLLMResponse converts an OpenAI ChatCompletion to model.LLMResponse.
-func completionToLLMResponse(resp *oai.ChatCompletion) *model.LLMResponse {
+func completionToLLMResponse(resp *oai.ChatCompletion) (*model.LLMResponse, error) {
 	choice := resp.Choices[0]
+	content, err := completionMessageToContent(&choice.Message)
+	if err != nil {
+		return nil, err
+	}
 	return &model.LLMResponse{
-		Content:      completionMessageToContent(&choice.Message),
+		Content:      content,
 		FinishReason: mapFinishReason(choice.FinishReason),
 		ModelVersion: resp.Model,
+		TurnComplete: true,
 		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
 			PromptTokenCount:     int32(resp.Usage.PromptTokens),
 			CandidatesTokenCount: int32(resp.Usage.CompletionTokens),
 			TotalTokenCount:      int32(resp.Usage.TotalTokens),
 		},
-	}
+	}, nil
 }
 
 // completionMessageToContent converts an OpenAI assistant message to a
 // genai.Content with the model role.
-func completionMessageToContent(msg *oai.ChatCompletionMessage) *genai.Content {
+func completionMessageToContent(msg *oai.ChatCompletionMessage) (*genai.Content, error) {
 	var parts []*genai.Part
 
 	if msg.Content != "" {
@@ -435,9 +494,9 @@ func completionMessageToContent(msg *oai.ChatCompletionMessage) *genai.Content {
 	}
 
 	for _, tc := range msg.ToolCalls {
-		var args map[string]any
-		if tc.Function.Arguments != "" {
-			_ = json.Unmarshal([]byte(tc.Function.Arguments), &args)
+		args, err := unmarshalArgs(tc.Function.Arguments)
+		if err != nil {
+			return nil, err
 		}
 		parts = append(parts, &genai.Part{
 			FunctionCall: &genai.FunctionCall{
@@ -449,9 +508,22 @@ func completionMessageToContent(msg *oai.ChatCompletionMessage) *genai.Content {
 	}
 
 	if len(parts) == 0 {
-		return nil
+		return nil, nil
 	}
-	return &genai.Content{Role: genai.RoleModel, Parts: parts}
+	return &genai.Content{Role: genai.RoleModel, Parts: parts}, nil
+}
+
+// unmarshalArgs parses a JSON tool-call arguments string into a map.
+// An empty string is treated as having no arguments.
+func unmarshalArgs(raw string) (map[string]any, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	var args map[string]any
+	if err := json.Unmarshal([]byte(raw), &args); err != nil {
+		return nil, fmt.Errorf("openai: unmarshal tool args: %w", err)
+	}
+	return args, nil
 }
 
 // extractText concatenates the Text field of every part in a genai.Content.
@@ -478,7 +550,10 @@ func mapFinishReason(r string) genai.FinishReason {
 	case "content_filter":
 		return genai.FinishReasonSafety
 	case "tool_calls":
-		// Tool calls are a normal stopping condition, not an error.
+		// OpenAI uses "tool_calls" when the model wants to invoke a function.
+		// We map this to Stop because the ADK caller inspects Content.Parts
+		// for FunctionCall parts to determine if tool execution is needed.
+		// There is no dedicated FinishReasonToolCall in genai.FinishReason.
 		return genai.FinishReasonStop
 	default:
 		return genai.FinishReasonUnspecified

@@ -250,18 +250,18 @@ type toolCallAccum struct {
 
 // buildFinalStreamResponse assembles the complete, non-Partial LLMResponse
 // after all streaming chunks have been processed.
+//
+// ADK requires that text and function calls never coexist in the same Content.
+// When tool calls are present the buffered text is dropped; text is only
+// included when there are no tool calls.
 func buildFinalStreamResponse(text string, toolAccums map[int64]*toolCallAccum, finishReason, modelVersion string, usage oai.CompletionUsage) (*adkmodel.LLMResponse, error) {
-	var parts []*genai.Part
-	if text != "" {
-		parts = append(parts, &genai.Part{Text: text})
-	}
-
 	indices := make([]int64, 0, len(toolAccums))
 	for idx := range toolAccums {
 		indices = append(indices, idx)
 	}
 	slices.Sort(indices)
 
+	var parts []*genai.Part
 	for _, idx := range indices {
 		acc := toolAccums[idx]
 		args, err := unmarshalArgs(acc.argsJSON)
@@ -275,6 +275,10 @@ func buildFinalStreamResponse(text string, toolAccums map[int64]*toolCallAccum, 
 				Args: args,
 			},
 		})
+	}
+
+	if len(parts) == 0 && text != "" {
+		parts = append(parts, &genai.Part{Text: text})
 	}
 
 	var content *genai.Content
@@ -482,12 +486,12 @@ func completionToLLMResponse(resp *oai.ChatCompletion) (*adkmodel.LLMResponse, e
 
 // completionMessageToContent converts an OpenAI assistant message to a
 // genai.Content with the model role.
+//
+// ADK requires that text and function calls never coexist in the same Content.
+// When tool calls are present the text is dropped; text is only included when
+// there are no tool calls.
 func completionMessageToContent(msg *oai.ChatCompletionMessage) (*genai.Content, error) {
 	var parts []*genai.Part
-
-	if msg.Content != "" {
-		parts = append(parts, &genai.Part{Text: msg.Content})
-	}
 
 	for _, tc := range msg.ToolCalls {
 		args, err := unmarshalArgs(tc.Function.Arguments)
@@ -501,6 +505,10 @@ func completionMessageToContent(msg *oai.ChatCompletionMessage) (*genai.Content,
 				Args: args,
 			},
 		})
+	}
+
+	if len(parts) == 0 && msg.Content != "" {
+		parts = append(parts, &genai.Part{Text: msg.Content})
 	}
 
 	if len(parts) == 0 {

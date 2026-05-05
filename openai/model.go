@@ -1,4 +1,4 @@
-// Package openai implements the [model.LLM] interface for OpenAI-compatible models.
+// Package openai implements the adkmodel.LLM interface for OpenAI-compatible models.
 package openai
 
 import (
@@ -14,7 +14,7 @@ import (
 	"github.com/openai/openai-go/shared"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/model"
+	adkmodel "google.golang.org/adk/model"
 )
 
 // Config holds the configuration for the OpenAI model wrapper.
@@ -27,17 +27,17 @@ type Config struct {
 	BaseURL string
 }
 
-type openAIModel struct {
+type model struct {
 	client oai.Client
 	name   string
 }
 
-// NewModel returns a [model.LLM] backed by the OpenAI Chat Completions API.
+// NewModel returns an [adkmodel.LLM] backed by the OpenAI Chat Completions API.
 //
 // modelName specifies the model to use (e.g. "gpt-4o", "gpt-4o-mini").
 // The Config.APIKey is passed to the underlying client; if empty, the client
 // falls back to the OPENAI_API_KEY environment variable.
-func NewModel(modelName string, cfg Config) model.LLM {
+func NewModel(modelName string, cfg Config) adkmodel.LLM {
 	opts := make([]option.RequestOption, 0, 2)
 	if cfg.APIKey != "" {
 		opts = append(opts, option.WithAPIKey(cfg.APIKey))
@@ -45,28 +45,28 @@ func NewModel(modelName string, cfg Config) model.LLM {
 	if cfg.BaseURL != "" {
 		opts = append(opts, option.WithBaseURL(cfg.BaseURL))
 	}
-	return &openAIModel{
+	return &model{
 		client: oai.NewClient(opts...),
 		name:   modelName,
 	}
 }
 
 // Name returns the model name supplied at construction time.
-func (m *openAIModel) Name() string {
+func (m *model) Name() string {
 	return m.name
 }
 
-// GenerateContent implements [model.LLM] by calling the OpenAI Chat
+// GenerateContent implements [adkmodel.LLM] by calling the OpenAI Chat
 // Completions API.  When stream is true it streams individual text deltas
 // followed by one final, fully assembled response.
-func (m *openAIModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+func (m *model) GenerateContent(ctx context.Context, req *adkmodel.LLMRequest, stream bool) iter.Seq2[*adkmodel.LLMResponse, error] {
 	modelName := req.Model
 	if modelName == "" {
 		modelName = m.name
 	}
 	params, err := m.buildParams(modelName, req)
 	if err != nil {
-		return func(yield func(*model.LLMResponse, error) bool) {
+		return func(yield func(*adkmodel.LLMResponse, error) bool) {
 			yield(nil, err)
 		}
 	}
@@ -77,7 +77,7 @@ func (m *openAIModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 }
 
 // buildParams assembles the OpenAI request parameters from the ADK request.
-func (m *openAIModel) buildParams(modelName string, req *model.LLMRequest) (oai.ChatCompletionNewParams, error) {
+func (m *model) buildParams(modelName string, req *adkmodel.LLMRequest) (oai.ChatCompletionNewParams, error) {
 	var msgs []oai.ChatCompletionMessageParamUnion
 
 	// System instruction is prepended as a system-role message.
@@ -139,8 +139,8 @@ func (m *openAIModel) buildParams(modelName string, req *model.LLMRequest) (oai.
 }
 
 // generate performs a non-streaming Chat Completions call.
-func (m *openAIModel) generate(ctx context.Context, params oai.ChatCompletionNewParams) iter.Seq2[*model.LLMResponse, error] {
-	return func(yield func(*model.LLMResponse, error) bool) {
+func (m *model) generate(ctx context.Context, params oai.ChatCompletionNewParams) iter.Seq2[*adkmodel.LLMResponse, error] {
+	return func(yield func(*adkmodel.LLMResponse, error) bool) {
 		resp, err := m.client.Chat.Completions.New(ctx, params)
 		if err != nil {
 			yield(nil, fmt.Errorf("openai: generate content: %w", err))
@@ -164,11 +164,11 @@ func (m *openAIModel) generate(ctx context.Context, params oai.ChatCompletionNew
 // Each text delta is yielded as a Partial response so the caller can display
 // incremental output.  After the stream ends a single final, non-Partial
 // response carrying the fully assembled content is yielded.
-func (m *openAIModel) generateStream(ctx context.Context, params oai.ChatCompletionNewParams) iter.Seq2[*model.LLMResponse, error] {
+func (m *model) generateStream(ctx context.Context, params oai.ChatCompletionNewParams) iter.Seq2[*adkmodel.LLMResponse, error] {
 	params.StreamOptions = oai.ChatCompletionStreamOptionsParam{
 		IncludeUsage: oai.Bool(true),
 	}
-	return func(yield func(*model.LLMResponse, error) bool) {
+	return func(yield func(*adkmodel.LLMResponse, error) bool) {
 		stream := m.client.Chat.Completions.NewStreaming(ctx, params)
 		defer stream.Close()
 
@@ -196,7 +196,7 @@ func (m *openAIModel) generateStream(ctx context.Context, params oai.ChatComplet
 
 			if delta.Content != "" {
 				textBuf.WriteString(delta.Content)
-				if !yield(&model.LLMResponse{
+				if !yield(&adkmodel.LLMResponse{
 					Content: &genai.Content{
 						Role:  genai.RoleModel,
 						Parts: []*genai.Part{{Text: delta.Content}},
@@ -250,7 +250,7 @@ type toolCallAccum struct {
 
 // buildFinalStreamResponse assembles the complete, non-Partial LLMResponse
 // after all streaming chunks have been processed.
-func buildFinalStreamResponse(text string, toolAccums map[int64]*toolCallAccum, finishReason, modelVersion string, usage oai.CompletionUsage) (*model.LLMResponse, error) {
+func buildFinalStreamResponse(text string, toolAccums map[int64]*toolCallAccum, finishReason, modelVersion string, usage oai.CompletionUsage) (*adkmodel.LLMResponse, error) {
 	var parts []*genai.Part
 	if text != "" {
 		parts = append(parts, &genai.Part{Text: text})
@@ -282,7 +282,7 @@ func buildFinalStreamResponse(text string, toolAccums map[int64]*toolCallAccum, 
 		content = &genai.Content{Role: genai.RoleModel, Parts: parts}
 	}
 
-	resp := &model.LLMResponse{
+	resp := &adkmodel.LLMResponse{
 		Content:      content,
 		FinishReason: mapFinishReason(finishReason),
 		ModelVersion: modelVersion,
@@ -460,14 +460,14 @@ func schemaToFunctionParams(s *genai.Schema) (shared.FunctionParameters, error) 
 	return shared.FunctionParameters(m), nil
 }
 
-// completionToLLMResponse converts an OpenAI ChatCompletion to model.LLMResponse.
-func completionToLLMResponse(resp *oai.ChatCompletion) (*model.LLMResponse, error) {
+// completionToLLMResponse converts an OpenAI ChatCompletion to adkmodel.LLMResponse.
+func completionToLLMResponse(resp *oai.ChatCompletion) (*adkmodel.LLMResponse, error) {
 	choice := resp.Choices[0]
 	content, err := completionMessageToContent(&choice.Message)
 	if err != nil {
 		return nil, err
 	}
-	return &model.LLMResponse{
+	return &adkmodel.LLMResponse{
 		Content:      content,
 		FinishReason: mapFinishReason(choice.FinishReason),
 		ModelVersion: resp.Model,
@@ -556,4 +556,4 @@ func mapFinishReason(r string) genai.FinishReason {
 	}
 }
 
-var _ model.LLM = (*openAIModel)(nil)
+var _ adkmodel.LLM = (*model)(nil)

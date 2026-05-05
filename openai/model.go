@@ -165,9 +165,9 @@ func (m *openAIModel) generate(ctx context.Context, params oai.ChatCompletionNew
 // incremental output.  After the stream ends a single final, non-Partial
 // response carrying the fully assembled content is yielded.
 func (m *openAIModel) generateStream(ctx context.Context, params oai.ChatCompletionNewParams) iter.Seq2[*model.LLMResponse, error] {
-	params.StreamOptions = oai.F(oai.ChatCompletionStreamOptionsParam{
+	params.StreamOptions = oai.ChatCompletionStreamOptionsParam{
 		IncludeUsage: oai.Bool(true),
-	})
+	}
 	return func(yield func(*model.LLMResponse, error) bool) {
 		stream := m.client.Chat.Completions.NewStreaming(ctx, params)
 		defer stream.Close()
@@ -397,8 +397,7 @@ func modelContentToMessage(c *genai.Content) oai.ChatCompletionMessageParamUnion
 		} else if part.FunctionCall != nil {
 			b, _ := json.Marshal(part.FunctionCall.Args)
 			toolCalls = append(toolCalls, oai.ChatCompletionMessageToolCallParam{
-				ID:   part.FunctionCall.ID,
-				Type: oai.ChatCompletionMessageToolCallTypeFunction,
+				ID: part.FunctionCall.ID,
 				Function: oai.ChatCompletionMessageToolCallFunctionParam{
 					Name:      part.FunctionCall.Name,
 					Arguments: string(b),
@@ -429,10 +428,7 @@ func declarationsToTools(tools []*genai.Tool) ([]oai.ChatCompletionToolParam, er
 				continue
 			}
 			toolParam := oai.ChatCompletionToolParam{
-				Type: oai.ChatCompletionToolTypeFunction,
-				Function: shared.FunctionDefinitionParam{
-					Name: fd.Name,
-				},
+				Function: shared.FunctionDefinitionParam{Name: fd.Name},
 			}
 			if fd.Description != "" {
 				toolParam.Function.Description = oai.String(fd.Description)

@@ -320,7 +320,11 @@ func contentsToMessages(contents []*genai.Content) ([]oai.ChatCompletionMessageP
 			}
 			msgs = append(msgs, userMsgs...)
 		case genai.RoleModel:
-			msgs = append(msgs, modelContentToMessage(c))
+			msg, err := modelContentToMessage(c)
+			if err != nil {
+				return nil, err
+			}
+			msgs = append(msgs, msg)
 		default:
 			// Unknown roles are silently skipped. Future roles added to genai
 			// will not cause a hard failure but will not be mapped either.
@@ -388,7 +392,7 @@ func functionResponseToToolMessage(fr *genai.FunctionResponse) oai.ChatCompletio
 
 // modelContentToMessage converts a model-role genai.Content to an OpenAI
 // assistant message.  Text and function calls may coexist in a single message.
-func modelContentToMessage(c *genai.Content) oai.ChatCompletionMessageParamUnion {
+func modelContentToMessage(c *genai.Content) (oai.ChatCompletionMessageParamUnion, error) {
 	var textBuf strings.Builder
 	var toolCalls []oai.ChatCompletionMessageToolCallParam
 
@@ -399,7 +403,10 @@ func modelContentToMessage(c *genai.Content) oai.ChatCompletionMessageParamUnion
 		if part.Text != "" {
 			textBuf.WriteString(part.Text)
 		} else if part.FunctionCall != nil {
-			b, _ := json.Marshal(part.FunctionCall.Args)
+			b, err := json.Marshal(part.FunctionCall.Args)
+			if err != nil {
+				return oai.ChatCompletionMessageParamUnion{}, fmt.Errorf("openai: marshal function call args: %w", err)
+			}
 			toolCalls = append(toolCalls, oai.ChatCompletionMessageToolCallParam{
 				ID: part.FunctionCall.ID,
 				Function: oai.ChatCompletionMessageToolCallFunctionParam{
@@ -417,7 +424,7 @@ func modelContentToMessage(c *genai.Content) oai.ChatCompletionMessageParamUnion
 	if len(toolCalls) > 0 {
 		asst.ToolCalls = toolCalls
 	}
-	return oai.ChatCompletionMessageParamUnion{OfAssistant: &asst}
+	return oai.ChatCompletionMessageParamUnion{OfAssistant: &asst}, nil
 }
 
 // declarationsToTools converts genai tool definitions to OpenAI tool params.

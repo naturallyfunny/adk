@@ -20,6 +20,7 @@ type Option func(*SessionService)
 type SessionService struct {
 	client                   *client.Client
 	agentName                string
+	userDisplayName          string
 	conversationHistory      int
 	includeKnowledge         bool
 	knowledgeContextTemplate *string
@@ -28,6 +29,12 @@ type SessionService struct {
 func WithConversationHistory(n int) Option {
 	return func(s *SessionService) {
 		s.conversationHistory = n
+	}
+}
+
+func WithUserDisplayName(name string) Option {
+	return func(s *SessionService) {
+		s.userDisplayName = name
 	}
 }
 
@@ -128,8 +135,11 @@ func (s *SessionService) AppendEvent(ctx context.Context, sess session.Session, 
 	case zep.RoleTypeAssistantRole:
 		msg.Name = &s.agentName
 	case zep.RoleTypeUserRole:
-		userID := sess.UserID()
-		msg.Name = &userID
+		name := s.userDisplayName
+		if name == "" {
+			name = sess.UserID()
+		}
+		msg.Name = &name
 	}
 
 	_, err := s.client.Thread.AddMessages(ctx, sess.ID(), &zep.AddThreadMessagesRequest{

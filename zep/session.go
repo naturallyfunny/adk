@@ -11,8 +11,10 @@ import (
 	"github.com/getzep/zep-go/v3/client"
 
 	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
+	adksession "google.golang.org/adk/session"
 	"google.golang.org/genai"
+
+	"go.naturallyfunny.dev/adk/session"
 )
 
 type Option func(*SessionService)
@@ -58,7 +60,7 @@ func NewSessionService(client *client.Client, agentName string, opts ...Option) 
 	return s
 }
 
-func (s *SessionService) Create(ctx context.Context, req *session.CreateRequest) (*session.CreateResponse, error) {
+func (s *SessionService) Create(ctx context.Context, req *adksession.CreateRequest) (*adksession.CreateResponse, error) {
 	if err := s.ensureUser(ctx, req.UserID); err != nil {
 		return nil, fmt.Errorf("zep ensure user: %w", err)
 	}
@@ -68,7 +70,7 @@ func (s *SessionService) Create(ctx context.Context, req *session.CreateRequest)
 	}); err != nil {
 		return nil, fmt.Errorf("zep create thread: %w", err)
 	}
-	return &session.CreateResponse{
+	return &adksession.CreateResponse{
 		Session: &zepSession{
 			id:     req.SessionID,
 			userID: req.UserID,
@@ -101,7 +103,7 @@ func (s *SessionService) mapRoleToZep(role string) zep.RoleType {
 	}
 }
 
-func (s *SessionService) AppendEvent(ctx context.Context, sess session.Session, event *session.Event) error {
+func (s *SessionService) AppendEvent(ctx context.Context, sess adksession.Session, event *adksession.Event) error {
 	if event == nil {
 		return nil
 	}
@@ -148,25 +150,26 @@ func (s *SessionService) AppendEvent(ctx context.Context, sess session.Session, 
 	return err
 }
 
-func (s *SessionService) Get(ctx context.Context, req *session.GetRequest) (*session.GetResponse, error) {
+func (s *SessionService) Get(ctx context.Context, req *adksession.GetRequest) (*adksession.GetResponse, error) {
 	sess := &zepSession{
 		id:     req.SessionID,
 		userID: req.UserID,
 		app:    req.AppName,
 	}
 
-	events, err := s.buildContext(ctx, req.SessionID)
+	events, lastTime, err := s.buildContext(ctx, req.SessionID)
 	if err != nil {
 		return nil, err
 	}
 
 	sess.events = events
+	sess.lastUpdate = lastTime
 
-	return &session.GetResponse{Session: sess}, nil
+	return &adksession.GetResponse{Session: sess}, nil
 }
 
-func (s *SessionService) buildContext(ctx context.Context, sessionID string) ([]*session.Event, error) {
-	var events []*session.Event
+func (s *SessionService) buildContext(ctx context.Context, sessionID string) ([]*adksession.Event, time.Time, error) {
+	var events []*adksession.Event
 
 	if s.includeKnowledge {
 		if knowledge := s.fetchKnowledge(ctx, sessionID, s.knowledgeContextTemplate); knowledge != "" {
@@ -176,13 +179,13 @@ func (s *SessionService) buildContext(ctx context.Context, sessionID string) ([]
 
 	// fetchHistory is always called: it verifies the thread exists in Zep,
 	// which lets the ADK runner trigger Create (via autoCreateSession) when needed.
-	history, err := s.fetchHistory(ctx, sessionID)
+	history, lastTime, err := s.fetchHistory(ctx, sessionID)
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
 	events = append(events, history...)
 
-	return events, nil
+	return events, lastTime, nil
 }
 
 func (s *SessionService) fetchKnowledge(ctx context.Context, sessionID string, templateID *string) string {
@@ -205,7 +208,7 @@ func (s *SessionService) fetchKnowledge(ctx context.Context, sessionID string, t
 	return fmt.Sprintf("[KNOWLEDGE]\n%s\n[/KNOWLEDGE]", ctxStr)
 }
 
-func (s *SessionService) fetchHistory(ctx context.Context, sessionID string) ([]*session.Event, error) {
+func (s *SessionService) fetchHistory(ctx context.Context, sessionID string) ([]*adksession.Event, time.Time, error) {
 	lastn := s.conversationHistory
 	if lastn == 0 {
 		lastn = 1 // minimum fetch to verify the thread exists in Zep
@@ -215,21 +218,24 @@ func (s *SessionService) fetchHistory(ctx context.Context, sessionID string) ([]
 		Lastn: zep.Int(lastn),
 	})
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
 
 	if s.conversationHistory == 0 {
-		return nil, nil // thread verified; caller requested no history
+		return nil, time.Time{}, nil // thread verified; caller requested no history
 	}
 
-	var events []*session.Event
+	loc := locationFromContext(ctx)
+
+	var events []*adksession.Event
+	var lastTime time.Time
 	for _, msg := range resp.GetMessages() {
 		if msg == nil {
 			continue
 		}
 
 		role := s.unmapRole(msg.Role)
-		evt := session.NewEvent(derefOrEmpty(msg.UUID))
+		evt := adksession.NewEvent(derefOrEmpty(msg.UUID))
 		evt.Author = role
 
 		contentRole := "model"
@@ -241,13 +247,29 @@ func (s *SessionService) fetchHistory(ctx context.Context, sessionID string) ([]
 		if msg.Name != nil && *msg.Name != "" && *msg.Name != s.agentName {
 			content = fmt.Sprintf("<speaker name=%q/>\n%s", *msg.Name, content)
 		}
+
+		// Prepend localized timestamp so the LLM can derive temporal context
+		// from history without explicit "current time" injection in system prompt.
+		// Format: [2026-05-07 22:14 WIB] — date, time, timezone abbreviation.
+		// If CreatedAt is absent or unparseable (e.g. older messages): skip prefix
+		// gracefully; the message remains useful as conversation context.
+		if msg.CreatedAt != nil {
+			if t, ok := parseTimestamp(*msg.CreatedAt); ok {
+				local := t.In(loc)
+				content = fmt.Sprintf("[%s] %s", local.Format("2006-01-02 15:04 MST"), content)
+				if t.After(lastTime) {
+					lastTime = t
+				}
+			}
+		}
+
 		evt.LLMResponse = model.LLMResponse{
 			Content: genai.NewContentFromText(content, genai.Role(contentRole)),
 		}
 		events = append(events, evt)
 	}
 
-	return events, nil
+	return events, lastTime, nil
 }
 
 func (s *SessionService) unmapRole(role zep.RoleType) string {
@@ -257,8 +279,8 @@ func (s *SessionService) unmapRole(role zep.RoleType) string {
 	return s.agentName
 }
 
-func (s *SessionService) newSystemEvent(category, content string) *session.Event {
-	evt := session.NewEvent(category)
+func (s *SessionService) newSystemEvent(category, content string) *adksession.Event {
+	evt := adksession.NewEvent(category)
 	evt.Author = "system"
 
 	evt.LLMResponse = model.LLMResponse{
@@ -268,12 +290,42 @@ func (s *SessionService) newSystemEvent(category, content string) *session.Event
 	return evt
 }
 
-func (s *SessionService) List(_ context.Context, _ *session.ListRequest) (*session.ListResponse, error) {
-	return &session.ListResponse{}, nil
+func (s *SessionService) List(_ context.Context, _ *adksession.ListRequest) (*adksession.ListResponse, error) {
+	return &adksession.ListResponse{}, nil
 }
 
-func (s *SessionService) Delete(_ context.Context, _ *session.DeleteRequest) error {
+func (s *SessionService) Delete(_ context.Context, _ *adksession.DeleteRequest) error {
 	return nil
+}
+
+// locationFromContext resolves *time.Location from context using
+// session.TimezoneKey set by the decorator. Always returns non-nil:
+// time.UTC is the fallback when timezone is absent or unrecognised.
+// The empty-string guard lives in session.TimezoneFromContext (ok && v != ""),
+// so time.LoadLocation is never called with an empty string here.
+func locationFromContext(ctx context.Context) *time.Location {
+	tz, ok := session.TimezoneFromContext(ctx)
+	if !ok {
+		return time.UTC
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		return time.UTC
+	}
+	return loc
+}
+
+// parseTimestamp tries RFC3339Nano then RFC3339. Returns false when neither
+// matches, allowing callers to skip the timestamp prefix gracefully rather
+// than surface a parse error to the LLM.
+func parseTimestamp(s string) (time.Time, bool) {
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return t, true
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, true
+	}
+	return time.Time{}, false
 }
 
 func derefOrEmpty(s *string) string {
@@ -284,29 +336,35 @@ func derefOrEmpty(s *string) string {
 }
 
 type zepSession struct {
-	id     string
-	userID string
-	app    string
-	events []*session.Event
+	id         string
+	userID     string
+	app        string
+	events     []*adksession.Event
+	lastUpdate time.Time // zero if no timestamped messages were fetched
 }
 
-func (z *zepSession) ID() string                { return z.id }
-func (z *zepSession) AppName() string           { return z.app }
-func (z *zepSession) UserID() string            { return z.userID }
-func (z *zepSession) LastUpdateTime() time.Time { return time.Now() }
-func (z *zepSession) State() session.State      { return zepState{} }
-func (z *zepSession) Events() session.Events    { return zepEvents(z.events) }
+func (z *zepSession) ID() string     { return z.id }
+func (z *zepSession) AppName() string { return z.app }
+func (z *zepSession) UserID() string { return z.userID }
+
+// LastUpdateTime returns the timestamp of the most recent message fetched from
+// Zep. Returns zero time.Time{} when no messages carry a parseable CreatedAt
+// (e.g. a brand-new or empty thread).
+func (z *zepSession) LastUpdateTime() time.Time { return z.lastUpdate }
+
+func (z *zepSession) State() adksession.State   { return zepState{} }
+func (z *zepSession) Events() adksession.Events { return zepEvents(z.events) }
 
 type zepState struct{}
 
-func (zepState) Get(_ string) (any, error)   { return nil, session.ErrStateKeyNotExist }
+func (zepState) Get(_ string) (any, error)   { return nil, adksession.ErrStateKeyNotExist }
 func (zepState) Set(_ string, _ any) error   { return nil }
 func (zepState) All() iter.Seq2[string, any] { return func(func(string, any) bool) {} }
 
-type zepEvents []*session.Event
+type zepEvents []*adksession.Event
 
-func (e zepEvents) All() iter.Seq[*session.Event] {
-	return func(yield func(*session.Event) bool) {
+func (e zepEvents) All() iter.Seq[*adksession.Event] {
+	return func(yield func(*adksession.Event) bool) {
 		for _, evt := range e {
 			if !yield(evt) {
 				return
@@ -317,7 +375,7 @@ func (e zepEvents) All() iter.Seq[*session.Event] {
 
 func (e zepEvents) Len() int { return len(e) }
 
-func (e zepEvents) At(i int) *session.Event {
+func (e zepEvents) At(i int) *adksession.Event {
 	if i < 0 || i >= len(e) {
 		return nil
 	}

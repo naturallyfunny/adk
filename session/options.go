@@ -15,6 +15,7 @@ type decoratedService struct {
 	persistAgent     bool
 	policy           string
 	dynamicFormatKey any
+	timezoneKey      any // external context key bridged to TimezoneKey per-request
 }
 
 type Option func(*decoratedService)
@@ -41,6 +42,21 @@ func EnableDynamicResponseFormat(key any) Option {
 	return func(d *decoratedService) {
 		d.dynamicFormatKey = key
 	}
+}
+
+// WithTimezoneFromContext registers an external context key from which an IANA
+// timezone string is read per-request. On each Get call, the decorator copies
+// the value from the external key into TimezoneKey so that base implementations
+// (e.g. zep) can access it via TimezoneFromContext without knowing about
+// identity packages or any caller-specific key.
+//
+// The value is read dynamically on every request — not at construction time —
+// so different callers with different timezones in context are handled correctly.
+func WithTimezoneFromContext(key any) Option {
+	if key == nil {
+		panic("session: WithTimezoneFromContext: key must not be nil")
+	}
+	return func(d *decoratedService) { d.timezoneKey = key }
 }
 
 func Wrap(base session.Service, opts ...Option) session.Service {
@@ -84,6 +100,15 @@ func (d *decoratedService) AppendEvent(ctx context.Context, sess session.Session
 }
 
 func (d *decoratedService) Get(ctx context.Context, req *session.GetRequest) (*session.GetResponse, error) {
+	// Bridge external timezone key → TimezoneKey BEFORE calling base.Get.
+	// The base implementation (e.g. zep.fetchHistory) reads TimezoneKey from
+	// context while fetching — bridging after base.Get would be too late.
+	if d.timezoneKey != nil {
+		if tz, ok := ctx.Value(d.timezoneKey).(string); ok && tz != "" {
+			ctx = context.WithValue(ctx, TimezoneKey, tz)
+		}
+	}
+
 	resp, err := d.base.Get(ctx, req)
 	if err != nil {
 		return nil, err

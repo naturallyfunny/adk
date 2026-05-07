@@ -10,12 +10,11 @@ import (
 )
 
 type decoratedService struct {
-	base             session.Service
-	persistUser      bool
-	persistAgent     bool
-	policy           string
-	dynamicFormatKey any
-	timezoneKey      any // external context key bridged to TimezoneKey per-request
+	base         session.Service
+	persistUser  bool
+	persistAgent bool
+	policy       string
+	timezoneKey  any // external context key bridged to TimezoneKey per-request
 }
 
 type Option func(*decoratedService)
@@ -35,12 +34,6 @@ func WithoutAgentResponsePersistence() Option {
 func WithPolicy(instruction string) Option {
 	return func(d *decoratedService) {
 		d.policy = instruction
-	}
-}
-
-func EnableDynamicResponseFormat(key any) Option {
-	return func(d *decoratedService) {
-		d.dynamicFormatKey = key
 	}
 }
 
@@ -122,12 +115,6 @@ func (d *decoratedService) Get(ctx context.Context, req *session.GetRequest) (*s
 	var assembled []*session.Event
 	for e := range sess.Events().All() {
 		assembled = append(assembled, e)
-	}
-
-	if d.dynamicFormatKey != nil {
-		if val, ok := ctx.Value(d.dynamicFormatKey).(string); ok && val != "" {
-			assembled = append(assembled, d.newSystemEvent("response_guideline", val))
-		}
 	}
 
 	if d.policy != "" {

@@ -23,7 +23,7 @@ func main() {
 	svc := zep.NewSessionService(
 		zepClient,
 		"my-agent",
-		zep.WithConversationHistory(10),
+		zep.WithContextHistoryLength(10),
 		zep.WithKnowledgeContext(nil),
 	)
 

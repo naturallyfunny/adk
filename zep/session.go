@@ -23,14 +23,14 @@ type SessionService struct {
 	client                   *client.Client
 	agentName                string
 	userDisplayName          string
-	conversationHistory      int
+	contextHistoryLength     int
 	includeKnowledge         bool
 	knowledgeContextTemplate *string
 }
 
-func WithConversationHistory(n int) Option {
+func WithContextHistoryLength(n int) Option {
 	return func(s *SessionService) {
-		s.conversationHistory = n
+		s.contextHistoryLength = n
 	}
 }
 
@@ -49,10 +49,10 @@ func WithKnowledgeContext(contextTemplateID *string) Option {
 
 func NewSessionService(client *client.Client, agentName string, opts ...Option) *SessionService {
 	s := &SessionService{
-		client:              client,
-		agentName:           agentName,
-		conversationHistory: 0,
-		includeKnowledge:    false,
+		client:               client,
+		agentName:            agentName,
+		contextHistoryLength: 0,
+		includeKnowledge:     false,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -209,7 +209,7 @@ func (s *SessionService) fetchKnowledge(ctx context.Context, sessionID string, t
 }
 
 func (s *SessionService) fetchHistory(ctx context.Context, sessionID string) ([]*adksession.Event, time.Time, error) {
-	lastn := s.conversationHistory
+	lastn := s.contextHistoryLength
 	if lastn == 0 {
 		lastn = 1 // minimum fetch to verify the thread exists in Zep
 	}
@@ -221,7 +221,7 @@ func (s *SessionService) fetchHistory(ctx context.Context, sessionID string) ([]
 		return nil, time.Time{}, err
 	}
 
-	if s.conversationHistory == 0 {
+	if s.contextHistoryLength == 0 {
 		return nil, time.Time{}, nil // thread verified; caller requested no history
 	}
 
@@ -244,19 +244,24 @@ func (s *SessionService) fetchHistory(ctx context.Context, sessionID string) ([]
 		}
 
 		content := msg.Content
-		if msg.Name != nil && *msg.Name != "" && *msg.Name != s.agentName {
-			content = fmt.Sprintf("<speaker name=%q/>\n%s", *msg.Name, content)
-		}
 
-		// Prepend localized timestamp so the LLM can derive temporal context
-		// from history without explicit "current time" injection in system prompt.
-		// Format: [2026-05-07 22:14 WIB] — date, time, timezone abbreviation.
-		// If CreatedAt is absent or unparseable (e.g. older messages): skip prefix
-		// gracefully; the message remains useful as conversation context.
+		// Prepend a unified [timestamp name] header to every message so the LLM
+		// can ground itself temporally and identify speakers without relying on
+		// role types. Role types are misleading in multi-agent sessions where an
+		// agent holds the "user" role when calling another agent — the name field
+		// is the reliable identity signal. Timezone abbreviation is omitted: all
+		// timestamps are already localised to the same user timezone per-request,
+		// so the abbreviation is redundant noise for the LLM.
+		// Format: [2026-05-07 23:57 Ava] or [2026-05-07 23:57] when name is
+		// absent. Skip prefix entirely when CreatedAt is absent or unparseable.
 		if msg.CreatedAt != nil {
 			if t, ok := parseTimestamp(*msg.CreatedAt); ok {
 				local := t.In(loc)
-				content = fmt.Sprintf("[%s] %s", local.Format("2006-01-02 15:04 MST"), content)
+				header := local.Format("2006-01-02 15:04")
+				if name := derefOrEmpty(msg.Name); name != "" {
+					header = header + " " + name
+				}
+				content = fmt.Sprintf("[%s] %s", header, content)
 				if t.After(lastTime) {
 					lastTime = t
 				}

@@ -81,6 +81,15 @@ func (d *decoratedService) AppendEvent(ctx context.Context, sess session.Session
 		return nil
 	}
 
+	// Update the decorator's event snapshot before any persistence guard so
+	// every appended event is visible via ctx.Session().Events() within the
+	// current turn, even when persistence is suppressed. Unwrap to the base
+	// session so the underlying service receives the session it created.
+	if ds, ok := sess.(*decoratedSession); ok {
+		ds.events = append(ds.events, event)
+		sess = ds.Session
+	}
+
 	isUser := event.Author == "user" || event.Author == "human"
 	if isUser && !d.persistUser {
 		return nil

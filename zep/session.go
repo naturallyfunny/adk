@@ -205,7 +205,7 @@ func (s *SessionService) fetchKnowledge(ctx context.Context, sessionID string, t
 		return ""
 	}
 
-	return fmt.Sprintf("[KNOWLEDGE]\n%s\n[/KNOWLEDGE]", ctxStr)
+	return fmt.Sprintf("<system-retrieved-related-knowldege>\n%s\n</system-retrieved-related-knowledge>", ctxStr)
 }
 
 func (s *SessionService) fetchHistory(ctx context.Context, sessionID string) ([]*adksession.Event, time.Time, error) {
@@ -214,9 +214,7 @@ func (s *SessionService) fetchHistory(ctx context.Context, sessionID string) ([]
 		lastn = 1 // minimum fetch to verify the thread exists in Zep
 	}
 
-	resp, err := s.client.Thread.Get(ctx, sessionID, &zep.ThreadGetRequest{
-		Lastn: zep.Int(lastn),
-	})
+	resp, err := s.client.Thread.Get(ctx, sessionID, &zep.ThreadGetRequest{Lastn: zep.Int(lastn)})
 	if err != nil {
 		return nil, time.Time{}, err
 	}
@@ -259,7 +257,7 @@ func (s *SessionService) fetchHistory(ctx context.Context, sessionID string) ([]
 				local := t.In(loc)
 				header := local.Format("2006-01-02 15:04")
 				if name := derefOrEmpty(msg.Name); name != "" {
-					header = header + " " + name
+					header = fmt.Sprintf("%s %s", name, header)
 				}
 				content = fmt.Sprintf("[%s] %s", header, content)
 				if t.After(lastTime) {
@@ -348,9 +346,9 @@ type zepSession struct {
 	lastUpdate time.Time // zero if no timestamped messages were fetched
 }
 
-func (z *zepSession) ID() string     { return z.id }
+func (z *zepSession) ID() string      { return z.id }
 func (z *zepSession) AppName() string { return z.app }
-func (z *zepSession) UserID() string { return z.userID }
+func (z *zepSession) UserID() string  { return z.userID }
 
 // LastUpdateTime returns the timestamp of the most recent message fetched from
 // Zep. Returns zero time.Time{} when no messages carry a parseable CreatedAt

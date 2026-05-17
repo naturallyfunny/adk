@@ -8,7 +8,6 @@ import "context"
 // value. With an unexported struct type, external packages can read
 // TimezoneKey but cannot construct a timezoneKey{} value themselves, so the
 // key is effectively immutable from outside this package.
-// Same pattern as postera.NamespaceKey.
 type timezoneKey struct{}
 
 // TimezoneKey is the context key for an IANA timezone string (e.g.

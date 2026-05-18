@@ -303,10 +303,10 @@ func TestEvents_EmptyHistory_NoPreambleNoPostamble(t *testing.T) {
 	events := runBuildContext(t, svc, context.Background())
 
 	for _, text := range systemTexts(events) {
-		if strings.HasPrefix(text, "[MESSAGE_HISTORY_FORMAT]") {
+		if strings.HasPrefix(text, "[MESSAGES_HISTORY_FORMAT]") {
 			t.Error("expected no format_preamble event for empty history")
 		}
-		if strings.HasPrefix(text, "[END_OF_MESSAGE_HISTORY]") {
+		if strings.HasPrefix(text, "[CRITICAL_FORMAT_REMINDER]") {
 			t.Error("expected no format_postamble event for empty history")
 		}
 	}
@@ -388,15 +388,66 @@ func TestFormatElapsed_Buckets(t *testing.T) {
 		d    time.Duration
 		want string
 	}{
-		{30 * time.Second, "less than a minute"},
+		{0 * time.Second, "0 seconds"},
+		{30 * time.Second, "30 seconds"},
+		{59 * time.Second, "59 seconds"},
+		{60 * time.Second, "1 minutes"},
 		{65 * time.Second, "1 minutes"},
+		{59 * time.Minute, "59 minutes"},
+		{60 * time.Minute, "1 hours 0 minutes"},
 		{90 * time.Minute, "1 hours 30 minutes"},
-		{50 * time.Hour, "2 days 2 hours"},
+		{23*time.Hour + 59*time.Minute, "23 hours 59 minutes"},
+		{24 * time.Hour, "1 days 0 hours 0 minutes"},
+		{50 * time.Hour, "2 days 2 hours 0 minutes"},
+		{50*time.Hour + 17*time.Minute, "2 days 2 hours 17 minutes"},
 	}
 	for _, c := range cases {
 		got := formatElapsed(c.d)
 		if got != c.want {
 			t.Errorf("formatElapsed(%v) = %q, want %q", c.d, got, c.want)
 		}
+	}
+}
+
+func TestEvents_Order_PreambleHistoryPostambleCurrentTime(t *testing.T) {
+	ts := "2026-05-17T05:57:00Z"
+	msgs := []*zepgo.Message{
+		{
+			Role:      zepgo.RoleTypeUserRole,
+			Content:   "hello",
+			Name:      ptr("Ian"),
+			CreatedAt: ptr(ts),
+		},
+	}
+	svc := newTestService(msgs, WithTimeHarness("Asia/Jakarta"))
+	events := runBuildContext(t, svc, context.Background())
+
+	// Expected sequence: preamble, history, postamble, current_time
+	if len(events) != 4 {
+		t.Fatalf("expected 4 events, got %d", len(events))
+	}
+
+	// 0: preamble
+	if events[0].Author != "system" ||
+		!strings.HasPrefix(eventText(t, events[0]), "[MESSAGES_HISTORY_FORMAT]") {
+		t.Errorf("position 0 should be preamble, got author=%q text=%q",
+			events[0].Author, eventText(t, events[0]))
+	}
+	// 1: history (non-system)
+	if events[1].Author == "system" {
+		t.Errorf("position 1 should be history (non-system), got system event: %q",
+			eventText(t, events[1]))
+	}
+	// 2: postamble
+	if events[2].Author != "system" ||
+		!strings.HasPrefix(eventText(t, events[2]), "[CRITICAL_FORMAT_REMINDER]") {
+		t.Errorf("position 2 should be postamble, got author=%q text=%q",
+			events[2].Author, eventText(t, events[2]))
+	}
+	// 3: current_time
+	if events[3].Author != "system" ||
+		!strings.HasPrefix(eventText(t, events[3]), "[CURRENT_TIME]") {
+		t.Errorf("position 3 should be current_time, got author=%q text=%q",
+			events[3].Author, eventText(t, events[3]))
 	}
 }

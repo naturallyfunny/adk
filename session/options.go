@@ -4,16 +4,13 @@ import (
 	"context"
 	"iter"
 
-	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 type decoratedService struct {
 	base         session.Service
 	persistUser  bool
 	persistAgent bool
-	policy       string
 	timezoneKey  any // external context key bridged to TimezoneKey per-request
 }
 
@@ -28,12 +25,6 @@ func WithoutUserMessagePersistence() Option {
 func WithoutAgentResponsePersistence() Option {
 	return func(d *decoratedService) {
 		d.persistAgent = false
-	}
-}
-
-func WithPolicy(instruction string) Option {
-	return func(d *decoratedService) {
-		d.policy = instruction
 	}
 }
 
@@ -126,27 +117,12 @@ func (d *decoratedService) Get(ctx context.Context, req *session.GetRequest) (*s
 		assembled = append(assembled, e)
 	}
 
-	if d.policy != "" {
-		assembled = append(assembled, d.newSystemEvent("policy", d.policy))
-	}
-
 	return &session.GetResponse{
 		Session: &decoratedSession{
 			Session: sess,
 			events:  assembled,
 		},
 	}, nil
-}
-
-func (d *decoratedService) newSystemEvent(category, content string) *session.Event {
-	evt := session.NewEvent(category)
-	evt.Author = "system"
-
-	evt.LLMResponse = model.LLMResponse{
-		Content: genai.NewContentFromText(content, genai.Role("model")),
-	}
-
-	return evt
 }
 
 type decoratedSession struct {

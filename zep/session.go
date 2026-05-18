@@ -376,7 +376,7 @@ func (s *SessionService) resolveLocation(ctx context.Context) (*time.Location, e
 
 func (s *SessionService) buildPreamble() string {
 	if s.timeHarnessEnabled {
-		return `[MESSAGE_HISTORY_FORMAT]
+		return `[MESSAGES_HISTORY_FORMAT]
 The conversation history below uses this format:
 
   [YYYY-MM-DD HH:MM Name] raw message content
@@ -388,9 +388,9 @@ always the user's local time.
 
 IMPORTANT: Never produce responses with this bracketed prefix. Respond
 with raw message content only.
-[/MESSAGE_HISTORY_FORMAT]`
+[/MESSAGES_HISTORY_FORMAT]`
 	}
-	return `[MESSAGE_HISTORY_FORMAT]
+	return `[MESSAGES_HISTORY_FORMAT]
 The conversation history below uses this format:
 
   [Name] raw message content
@@ -400,20 +400,20 @@ identification.
 
 IMPORTANT: Never produce responses with this bracketed prefix. Respond
 with raw message content only.
-[/MESSAGE_HISTORY_FORMAT]`
+[/MESSAGES_HISTORY_FORMAT]`
 }
 
 func (s *SessionService) buildPostamble() string {
 	if s.timeHarnessEnabled {
-		return `[END_OF_MESSAGE_HISTORY]
-Reminder: never respond with the [YYYY-MM-DD HH:MM Name] format. Output
+		return `[CRITICAL_FORMAT_REMINDER]
+CRITICAL: Do not respond using the [YYYY-MM-DD HH:MM Name] format. Output
 raw message content only.
-[/END_OF_MESSAGE_HISTORY]`
+[/CRITICAL_FORMAT_REMINDER]`
 	}
-	return `[END_OF_MESSAGE_HISTORY]
-Reminder: never respond with the [Name] format. Output raw message
+	return `[CRITICAL_FORMAT_REMINDER]
+CRITICAL: Do not respond using the [Name] format. Output raw message
 content only.
-[/END_OF_MESSAGE_HISTORY]`
+[/CRITICAL_FORMAT_REMINDER]`
 }
 
 func (s *SessionService) buildCurrentTimeAnchor(loc *time.Location, lastTime time.Time) string {
@@ -431,14 +431,17 @@ func (s *SessionService) buildCurrentTimeAnchor(loc *time.Location, lastTime tim
 }
 
 // formatElapsed returns a human-readable duration.
+// Pluralization is always-plural by design (e.g. "1 minutes") — LLMs
+// tolerate this and avoiding plural/singular branching keeps the
+// function simple.
 //
-//	< 1 minute  → "less than a minute"
+//	< 1 minute  → "N seconds"
 //	< 60 min    → "N minutes"
 //	< 24 hours  → "H hours M minutes"
-//	≥ 24 hours  → "D days H hours"
+//	≥ 24 hours  → "D days H hours M minutes"
 func formatElapsed(d time.Duration) string {
 	if d < time.Minute {
-		return "less than a minute"
+		return fmt.Sprintf("%d seconds", int(d.Seconds()))
 	}
 	if d < time.Hour {
 		return fmt.Sprintf("%d minutes", int(d.Minutes()))
@@ -448,9 +451,12 @@ func formatElapsed(d time.Duration) string {
 		m := int(d.Minutes()) - h*60
 		return fmt.Sprintf("%d hours %d minutes", h, m)
 	}
-	days := int(d.Hours() / 24)
-	h := int(d.Hours()) - days*24
-	return fmt.Sprintf("%d days %d hours", days, h)
+	totalMinutes := int(d.Minutes())
+	days := totalMinutes / (24 * 60)
+	remaining := totalMinutes - days*24*60
+	h := remaining / 60
+	m := remaining - h*60
+	return fmt.Sprintf("%d days %d hours %d minutes", days, h, m)
 }
 
 func (s *SessionService) unmapRole(role zep.RoleType) string {
@@ -480,8 +486,9 @@ func (s *SessionService) Delete(_ context.Context, _ *adksession.DeleteRequest) 
 }
 
 // parseTimestamp tries RFC3339Nano then RFC3339. Returns false when neither
-// matches, allowing callers to skip the timestamp prefix gracefully rather
-// than surface a parse error to the LLM.
+// matches. When TimeHarness is enabled, fetchHistory treats false as a
+// hard error (invariant violation). When TimeHarness is disabled, the
+// caller path does not invoke parseTimestamp at all.
 func parseTimestamp(s string) (time.Time, bool) {
 	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
 		return t, true

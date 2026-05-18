@@ -26,6 +26,13 @@ type SessionService struct {
 	contextHistoryLength     int
 	includeKnowledge         bool
 	knowledgeContextTemplate *string
+
+	timeHarnessEnabled     bool
+	timeHarnessFromContext bool
+	timeHarnessStaticLoc   *time.Location // nil when FromContext, set otherwise
+
+	// threadGet is a test hook; when non-nil it replaces Thread.Get in fetchHistory.
+	threadGet func(ctx context.Context, sessionID string, lastn int) ([]*zep.Message, error)
 }
 
 func WithContextHistoryLength(n int) Option {
@@ -44,6 +51,47 @@ func WithKnowledgeContext(contextTemplateID *string) Option {
 	return func(s *SessionService) {
 		s.includeKnowledge = true
 		s.knowledgeContextTemplate = contextTemplateID
+	}
+}
+
+// WithTimeHarness enables time-awareness with a static IANA timezone.
+// Empty string means UTC. An invalid timezone PANICS at construction
+// (fail-fast — invalid timezone is always a programmer error).
+//
+// When enabled:
+//   - History message prefix becomes [YYYY-MM-DD HH:MM Name] instead of [Name]
+//   - A current_time anchor event is appended after history
+//   - Any message with unparseable CreatedAt causes Get to return an error
+func WithTimeHarness(timezone string) Option {
+	return func(s *SessionService) {
+		s.timeHarnessEnabled = true
+		s.timeHarnessFromContext = false
+		if timezone == "" {
+			s.timeHarnessStaticLoc = time.UTC
+			return
+		}
+		loc, err := time.LoadLocation(timezone)
+		if err != nil {
+			panic(fmt.Sprintf("zep: WithTimeHarness: invalid timezone %q: %v", timezone, err))
+		}
+		s.timeHarnessStaticLoc = loc
+	}
+}
+
+// WithTimeHarnessFromContext enables time-awareness with per-request
+// timezone resolution. Reads session.TimezoneKey from context at fetch
+// time. If the key is absent or holds an invalid IANA timezone at
+// request time, Get returns an error.
+//
+// Intended for multi-user public agents where the end-user's timezone
+// arrives via the session decorator's WithTimezoneFromContext bridge.
+//
+// If WithTimeHarness is also called, last call wins.
+func WithTimeHarnessFromContext() Option {
+	return func(s *SessionService) {
+		s.timeHarnessEnabled = true
+		s.timeHarnessFromContext = true
+		s.timeHarnessStaticLoc = nil
 	}
 }
 
@@ -183,7 +231,20 @@ func (s *SessionService) buildContext(ctx context.Context, sessionID string) ([]
 	if err != nil {
 		return nil, time.Time{}, err
 	}
-	events = append(events, history...)
+
+	if len(history) > 0 {
+		events = append(events, s.newSystemEvent("format_preamble", s.buildPreamble()))
+		events = append(events, history...)
+		events = append(events, s.newSystemEvent("format_postamble", s.buildPostamble()))
+	}
+
+	if s.timeHarnessEnabled {
+		loc, err := s.resolveLocation(ctx)
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		events = append(events, s.newSystemEvent("current_time", s.buildCurrentTimeAnchor(loc, lastTime)))
+	}
 
 	return events, lastTime, nil
 }
@@ -214,20 +275,32 @@ func (s *SessionService) fetchHistory(ctx context.Context, sessionID string) ([]
 		lastn = 1 // minimum fetch to verify the thread exists in Zep
 	}
 
-	resp, err := s.client.Thread.Get(ctx, sessionID, &zep.ThreadGetRequest{Lastn: zep.Int(lastn)})
+	loc, err := s.resolveLocation(ctx)
 	if err != nil {
 		return nil, time.Time{}, err
 	}
 
-	if s.contextHistoryLength == 0 {
-		return nil, time.Time{}, nil // thread verified; caller requested no history
-	}
+	var rawMsgs []*zep.Message
 
-	loc := locationFromContext(ctx)
+	if s.threadGet != nil {
+		rawMsgs, err = s.threadGet(ctx, sessionID, lastn)
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+	} else {
+		resp, rerr := s.client.Thread.Get(ctx, sessionID, &zep.ThreadGetRequest{Lastn: zep.Int(lastn)})
+		if rerr != nil {
+			return nil, time.Time{}, rerr
+		}
+		if s.contextHistoryLength == 0 {
+			return nil, time.Time{}, nil // thread verified; caller requested no history
+		}
+		rawMsgs = resp.GetMessages()
+	}
 
 	var events []*adksession.Event
 	var lastTime time.Time
-	for _, msg := range resp.GetMessages() {
+	for _, msg := range rawMsgs {
 		if msg == nil {
 			continue
 		}
@@ -241,29 +314,33 @@ func (s *SessionService) fetchHistory(ctx context.Context, sessionID string) ([]
 			contentRole = "user"
 		}
 
+		name := derefOrEmpty(msg.Name)
+		if name == "" {
+			name = role // fallback so prefix is never bare []
+		}
+
 		content := msg.Content
 
-		// Prepend a unified [timestamp name] header to every message so the LLM
-		// can ground itself temporally and identify speakers without relying on
-		// role types. Role types are misleading in multi-agent sessions where an
-		// agent holds the "user" role when calling another agent — the name field
-		// is the reliable identity signal. Timezone abbreviation is omitted: all
-		// timestamps are already localised to the same user timezone per-request,
-		// so the abbreviation is redundant noise for the LLM.
-		// Format: [2026-05-07 23:57 Ava] or [2026-05-07 23:57] when name is
-		// absent. Skip prefix entirely when CreatedAt is absent or unparseable.
-		if msg.CreatedAt != nil {
-			if t, ok := parseTimestamp(*msg.CreatedAt); ok {
-				local := t.In(loc)
-				header := local.Format("2006-01-02 15:04")
-				if name := derefOrEmpty(msg.Name); name != "" {
-					header = fmt.Sprintf("%s %s", name, header)
-				}
-				content = fmt.Sprintf("[%s] %s", header, content)
-				if t.After(lastTime) {
-					lastTime = t
-				}
+		if s.timeHarnessEnabled {
+			if msg.CreatedAt == nil {
+				return nil, time.Time{}, fmt.Errorf(
+					"zep: TimeHarness enabled but message %s has nil CreatedAt",
+					derefOrEmpty(msg.UUID))
 			}
+			t, ok := parseTimestamp(*msg.CreatedAt)
+			if !ok {
+				return nil, time.Time{}, fmt.Errorf(
+					"zep: TimeHarness enabled but message %s has unparseable CreatedAt: %q",
+					derefOrEmpty(msg.UUID), *msg.CreatedAt)
+			}
+			local := t.In(loc)
+			header := fmt.Sprintf("%s %s", local.Format("2006-01-02 15:04"), name)
+			content = fmt.Sprintf("[%s] %s", header, content)
+			if t.After(lastTime) {
+				lastTime = t
+			}
+		} else {
+			content = fmt.Sprintf("[%s] %s", name, content)
 		}
 
 		evt.LLMResponse = model.LLMResponse{
@@ -273,6 +350,107 @@ func (s *SessionService) fetchHistory(ctx context.Context, sessionID string) ([]
 	}
 
 	return events, lastTime, nil
+}
+
+// resolveLocation returns the timezone for header formatting.
+// Returns (nil, nil) when TimeHarness is disabled — callers must
+// branch on that case. Returns an error when TimeHarness is enabled
+// but the timezone is unresolvable.
+func (s *SessionService) resolveLocation(ctx context.Context) (*time.Location, error) {
+	if !s.timeHarnessEnabled {
+		return nil, nil
+	}
+	if !s.timeHarnessFromContext {
+		return s.timeHarnessStaticLoc, nil
+	}
+	tz, ok := session.TimezoneFromContext(ctx)
+	if !ok {
+		return nil, fmt.Errorf("zep: TimeHarnessFromContext active but session.TimezoneKey absent in context")
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		return nil, fmt.Errorf("zep: TimeHarnessFromContext: invalid timezone %q: %w", tz, err)
+	}
+	return loc, nil
+}
+
+func (s *SessionService) buildPreamble() string {
+	if s.timeHarnessEnabled {
+		return `[MESSAGE_HISTORY_FORMAT]
+The conversation history below uses this format:
+
+  [YYYY-MM-DD HH:MM Name] raw message content
+
+The bracketed prefix is system-provided metadata for time-awareness and
+speaker identification. All timestamps are already localized to the user's
+local time — you do not need to think about timezones; what you see is
+always the user's local time.
+
+IMPORTANT: Never produce responses with this bracketed prefix. Respond
+with raw message content only.
+[/MESSAGE_HISTORY_FORMAT]`
+	}
+	return `[MESSAGE_HISTORY_FORMAT]
+The conversation history below uses this format:
+
+  [Name] raw message content
+
+The bracketed prefix is system-provided metadata for speaker
+identification.
+
+IMPORTANT: Never produce responses with this bracketed prefix. Respond
+with raw message content only.
+[/MESSAGE_HISTORY_FORMAT]`
+}
+
+func (s *SessionService) buildPostamble() string {
+	if s.timeHarnessEnabled {
+		return `[END_OF_MESSAGE_HISTORY]
+Reminder: never respond with the [YYYY-MM-DD HH:MM Name] format. Output
+raw message content only.
+[/END_OF_MESSAGE_HISTORY]`
+	}
+	return `[END_OF_MESSAGE_HISTORY]
+Reminder: never respond with the [Name] format. Output raw message
+content only.
+[/END_OF_MESSAGE_HISTORY]`
+}
+
+func (s *SessionService) buildCurrentTimeAnchor(loc *time.Location, lastTime time.Time) string {
+	now := time.Now().In(loc)
+	nowStr := now.Format("2006-01-02 15:04")
+
+	if lastTime.IsZero() {
+		return fmt.Sprintf("[CURRENT_TIME]\nCurrent date and time: %s\n[/CURRENT_TIME]", nowStr)
+	}
+
+	elapsed := time.Since(lastTime)
+	return fmt.Sprintf(
+		"[CURRENT_TIME]\nCurrent date and time: %s\nTime since previous message: %s\n[/CURRENT_TIME]",
+		nowStr, formatElapsed(elapsed))
+}
+
+// formatElapsed returns a human-readable duration.
+//
+//	< 1 minute  → "less than a minute"
+//	< 60 min    → "N minutes"
+//	< 24 hours  → "H hours M minutes"
+//	≥ 24 hours  → "D days H hours"
+func formatElapsed(d time.Duration) string {
+	if d < time.Minute {
+		return "less than a minute"
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%d minutes", int(d.Minutes()))
+	}
+	if d < 24*time.Hour {
+		h := int(d.Hours())
+		m := int(d.Minutes()) - h*60
+		return fmt.Sprintf("%d hours %d minutes", h, m)
+	}
+	days := int(d.Hours() / 24)
+	h := int(d.Hours()) - days*24
+	return fmt.Sprintf("%d days %d hours", days, h)
 }
 
 func (s *SessionService) unmapRole(role zep.RoleType) string {
@@ -299,23 +477,6 @@ func (s *SessionService) List(_ context.Context, _ *adksession.ListRequest) (*ad
 
 func (s *SessionService) Delete(_ context.Context, _ *adksession.DeleteRequest) error {
 	return nil
-}
-
-// locationFromContext resolves *time.Location from context using
-// session.TimezoneKey set by the decorator. Always returns non-nil:
-// time.UTC is the fallback when timezone is absent or unrecognised.
-// The empty-string guard lives in session.TimezoneFromContext (ok && v != ""),
-// so time.LoadLocation is never called with an empty string here.
-func locationFromContext(ctx context.Context) *time.Location {
-	tz, ok := session.TimezoneFromContext(ctx)
-	if !ok {
-		return time.UTC
-	}
-	loc, err := time.LoadLocation(tz)
-	if err != nil {
-		return time.UTC
-	}
-	return loc
 }
 
 // parseTimestamp tries RFC3339Nano then RFC3339. Returns false when neither

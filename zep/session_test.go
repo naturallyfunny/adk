@@ -7,6 +7,7 @@ import (
 	"time"
 
 	zepgo "github.com/getzep/zep-go/v3"
+	"github.com/getzep/zep-go/v3/option"
 
 	adksession "google.golang.org/adk/session"
 
@@ -16,15 +17,47 @@ import (
 // ptr returns a pointer to the given string.
 func ptr(s string) *string { return &s }
 
-// newTestService builds a SessionService with a stub threadGet for testing.
-// agentName defaults to "Zee"; contextHistoryLength defaults to 10.
+type fakeThread struct {
+	getResp *zepgo.MessageListResponse
+	getErr  error
+}
+
+func (f *fakeThread) Create(context.Context, *zepgo.CreateThreadRequest, ...option.RequestOption) (*zepgo.Thread, error) {
+	return nil, nil
+}
+
+func (f *fakeThread) AddMessages(context.Context, string, *zepgo.AddThreadMessagesRequest, ...option.RequestOption) (*zepgo.AddThreadMessagesResponse, error) {
+	return nil, nil
+}
+
+func (f *fakeThread) Get(context.Context, string, *zepgo.ThreadGetRequest, ...option.RequestOption) (*zepgo.MessageListResponse, error) {
+	return f.getResp, f.getErr
+}
+
+func (f *fakeThread) GetUserContext(context.Context, string, *zepgo.ThreadGetUserContextRequest, ...option.RequestOption) (*zepgo.ThreadContextResponse, error) {
+	return nil, nil
+}
+
+type fakeUser struct{}
+
+func (fakeUser) Get(context.Context, string, ...option.RequestOption) (*zepgo.User, error) {
+	return nil, nil
+}
+
+func (fakeUser) Add(context.Context, *zepgo.CreateUserRequest, ...option.RequestOption) (*zepgo.User, error) {
+	return nil, nil
+}
+
+// newTestService builds a SessionService with fake zep clients for testing.
+// agentName defaults to "Zee"; messagesHistoryLength defaults to 10.
 func newTestService(msgs []*zepgo.Message, opts ...Option) *SessionService {
 	s := &SessionService{
-		agentName:            "Zee",
-		contextHistoryLength: 10,
-		threadGet: func(_ context.Context, _ string, _ int) ([]*zepgo.Message, error) {
-			return msgs, nil
+		agentName:             "Zee",
+		messagesHistoryLength: 10,
+		thread: &fakeThread{
+			getResp: &zepgo.MessageListResponse{Messages: msgs},
 		},
+		user: fakeUser{},
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -350,7 +383,7 @@ func TestEvents_CurrentTime_OnlyWhenHarnessOn(t *testing.T) {
 }
 
 func TestCurrentTime_WithLastTime_IncludesElapsed(t *testing.T) {
-	svc := &SessionService{timeHarnessEnabled: true}
+	svc := &SessionService{timeHarnessStaticLoc: time.UTC}
 	lastTime := time.Now().Add(-90 * time.Minute)
 	result := svc.buildCurrentTimeAnchor(time.UTC, lastTime)
 
@@ -363,7 +396,7 @@ func TestCurrentTime_WithLastTime_IncludesElapsed(t *testing.T) {
 }
 
 func TestCurrentTime_NoLastTime_NoElapsed(t *testing.T) {
-	svc := &SessionService{timeHarnessEnabled: true}
+	svc := &SessionService{timeHarnessStaticLoc: time.UTC}
 	result := svc.buildCurrentTimeAnchor(time.UTC, time.Time{})
 
 	if strings.Contains(result, "Time since previous message:") {

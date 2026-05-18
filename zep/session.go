@@ -9,6 +9,9 @@ import (
 
 	"github.com/getzep/zep-go/v3"
 	"github.com/getzep/zep-go/v3/client"
+	"github.com/getzep/zep-go/v3/option"
+	threadclient "github.com/getzep/zep-go/v3/thread/client"
+	userclient "github.com/getzep/zep-go/v3/user"
 
 	"google.golang.org/adk/model"
 	adksession "google.golang.org/adk/session"
@@ -19,25 +22,36 @@ import (
 
 type Option func(*SessionService)
 
+// threadClient is the slice of zep thread functionality this service needs.
+type threadClient interface {
+	Create(ctx context.Context, request *zep.CreateThreadRequest, opts ...option.RequestOption) (*zep.Thread, error)
+	AddMessages(ctx context.Context, threadID string, request *zep.AddThreadMessagesRequest, opts ...option.RequestOption) (*zep.AddThreadMessagesResponse, error)
+	Get(ctx context.Context, threadID string, request *zep.ThreadGetRequest, opts ...option.RequestOption) (*zep.MessageListResponse, error)
+	GetUserContext(ctx context.Context, threadID string, request *zep.ThreadGetUserContextRequest, opts ...option.RequestOption) (*zep.ThreadContextResponse, error)
+}
+
+// userClient is the slice of zep user functionality this service needs.
+type userClient interface {
+	Get(ctx context.Context, userID string, opts ...option.RequestOption) (*zep.User, error)
+	Add(ctx context.Context, request *zep.CreateUserRequest, opts ...option.RequestOption) (*zep.User, error)
+}
+
 type SessionService struct {
-	client                   *client.Client
+	thread                   threadClient
+	user                     userClient
 	agentName                string
 	userDisplayName          string
-	contextHistoryLength     int
+	messagesHistoryLength    int
 	includeKnowledge         bool
 	knowledgeContextTemplate *string
 
-	timeHarnessEnabled     bool
 	timeHarnessFromContext bool
-	timeHarnessStaticLoc   *time.Location // nil when FromContext, set otherwise
-
-	// threadGet is a test hook; when non-nil it replaces Thread.Get in fetchHistory.
-	threadGet func(ctx context.Context, sessionID string, lastn int) ([]*zep.Message, error)
+	timeHarnessStaticLoc   *time.Location // non-nil iff static mode
 }
 
-func WithContextHistoryLength(n int) Option {
+func WithMessagesHistoryLength(n int) Option {
 	return func(s *SessionService) {
-		s.contextHistoryLength = n
+		s.messagesHistoryLength = n
 	}
 }
 
@@ -64,7 +78,6 @@ func WithKnowledgeContext(contextTemplateID *string) Option {
 //   - Any message with unparseable CreatedAt causes Get to return an error
 func WithTimeHarness(timezone string) Option {
 	return func(s *SessionService) {
-		s.timeHarnessEnabled = true
 		s.timeHarnessFromContext = false
 		if timezone == "" {
 			s.timeHarnessStaticLoc = time.UTC
@@ -89,18 +102,20 @@ func WithTimeHarness(timezone string) Option {
 // If WithTimeHarness is also called, last call wins.
 func WithTimeHarnessFromContext() Option {
 	return func(s *SessionService) {
-		s.timeHarnessEnabled = true
 		s.timeHarnessFromContext = true
 		s.timeHarnessStaticLoc = nil
 	}
 }
 
-func NewSessionService(client *client.Client, agentName string, opts ...Option) *SessionService {
+func NewSessionService(c *client.Client, agentName string, opts ...Option) *SessionService {
 	s := &SessionService{
-		client:               client,
-		agentName:            agentName,
-		contextHistoryLength: 0,
-		includeKnowledge:     false,
+		agentName:             agentName,
+		messagesHistoryLength: 0,
+		includeKnowledge:      false,
+	}
+	if c != nil {
+		s.thread = c.Thread
+		s.user = c.User
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -112,7 +127,7 @@ func (s *SessionService) Create(ctx context.Context, req *adksession.CreateReque
 	if err := s.ensureUser(ctx, req.UserID); err != nil {
 		return nil, fmt.Errorf("zep ensure user: %w", err)
 	}
-	if _, err := s.client.Thread.Create(ctx, &zep.CreateThreadRequest{
+	if _, err := s.thread.Create(ctx, &zep.CreateThreadRequest{
 		ThreadID: req.SessionID,
 		UserID:   req.UserID,
 	}); err != nil {
@@ -128,7 +143,7 @@ func (s *SessionService) Create(ctx context.Context, req *adksession.CreateReque
 }
 
 func (s *SessionService) ensureUser(ctx context.Context, userID string) error {
-	_, err := s.client.User.Get(ctx, userID)
+	_, err := s.user.Get(ctx, userID)
 	if err == nil {
 		return nil
 	}
@@ -136,11 +151,11 @@ func (s *SessionService) ensureUser(ctx context.Context, userID string) error {
 	if !errors.As(err, &notFound) {
 		return err
 	}
-	_, err = s.client.User.Add(ctx, &zep.CreateUserRequest{UserID: userID})
+	_, err = s.user.Add(ctx, &zep.CreateUserRequest{UserID: userID})
 	return err
 }
 
-func (s *SessionService) mapRoleToZep(role string) zep.RoleType {
+func (s *SessionService) roleFromADK(role string) zep.RoleType {
 	switch role {
 	case "user", "human":
 		return zep.RoleTypeUserRole
@@ -175,7 +190,7 @@ func (s *SessionService) AppendEvent(ctx context.Context, sess adksession.Sessio
 		return nil
 	}
 
-	zepRole := s.mapRoleToZep(event.Author)
+	zepRole := s.roleFromADK(event.Author)
 
 	msg := &zep.Message{
 		Role:    zepRole,
@@ -192,7 +207,7 @@ func (s *SessionService) AppendEvent(ctx context.Context, sess adksession.Sessio
 		msg.Name = &name
 	}
 
-	_, err := s.client.Thread.AddMessages(ctx, sess.ID(), &zep.AddThreadMessagesRequest{
+	_, err := s.thread.AddMessages(ctx, sess.ID(), &zep.AddThreadMessagesRequest{
 		Messages: []*zep.Message{msg},
 	})
 	return err
@@ -233,12 +248,12 @@ func (s *SessionService) buildContext(ctx context.Context, sessionID string) ([]
 	}
 
 	if len(history) > 0 {
-		events = append(events, s.newSystemEvent("format_preamble", s.buildPreamble()))
+		events = append(events, s.newSystemEvent("messages_history_preamble", s.buildMessagesHistoryPreamble()))
 		events = append(events, history...)
-		events = append(events, s.newSystemEvent("format_postamble", s.buildPostamble()))
+		events = append(events, s.newSystemEvent("messages_history_postamble", s.buildMessagesHistoryPostamble()))
 	}
 
-	if s.timeHarnessEnabled {
+	if s.timeHarnessEnabled() {
 		loc, err := s.resolveLocation(ctx)
 		if err != nil {
 			return nil, time.Time{}, err
@@ -250,7 +265,7 @@ func (s *SessionService) buildContext(ctx context.Context, sessionID string) ([]
 }
 
 func (s *SessionService) fetchKnowledge(ctx context.Context, sessionID string, templateID *string) string {
-	resp, err := s.client.Thread.GetUserContext(ctx, sessionID, &zep.ThreadGetUserContextRequest{
+	resp, err := s.thread.GetUserContext(ctx, sessionID, &zep.ThreadGetUserContextRequest{
 		TemplateID: templateID,
 	})
 	if err != nil {
@@ -266,46 +281,40 @@ func (s *SessionService) fetchKnowledge(ctx context.Context, sessionID string, t
 		return ""
 	}
 
-	return fmt.Sprintf("<system-retrieved-related-knowldege>\n%s\n</system-retrieved-related-knowledge>", ctxStr)
+	return fmt.Sprintf("[SYSTEM_RETRIEVED_RELATED_KNOWLEDGE]\n%s\n[/SYSTEM_RETRIEVED_RELATED_KNOWLEDGE]", ctxStr)
 }
 
 func (s *SessionService) fetchHistory(ctx context.Context, sessionID string) ([]*adksession.Event, time.Time, error) {
-	lastn := s.contextHistoryLength
+	lastn := s.messagesHistoryLength
 	if lastn == 0 {
 		lastn = 1 // minimum fetch to verify the thread exists in Zep
 	}
 
-	loc, err := s.resolveLocation(ctx)
-	if err != nil {
-		return nil, time.Time{}, err
-	}
-
-	var rawMsgs []*zep.Message
-
-	if s.threadGet != nil {
-		rawMsgs, err = s.threadGet(ctx, sessionID, lastn)
+	var loc *time.Location
+	if s.timeHarnessEnabled() {
+		var err error
+		loc, err = s.resolveLocation(ctx)
 		if err != nil {
 			return nil, time.Time{}, err
 		}
-	} else {
-		resp, rerr := s.client.Thread.Get(ctx, sessionID, &zep.ThreadGetRequest{Lastn: zep.Int(lastn)})
-		if rerr != nil {
-			return nil, time.Time{}, rerr
-		}
-		if s.contextHistoryLength == 0 {
-			return nil, time.Time{}, nil // thread verified; caller requested no history
-		}
-		rawMsgs = resp.GetMessages()
+	}
+
+	resp, err := s.thread.Get(ctx, sessionID, &zep.ThreadGetRequest{Lastn: zep.Int(lastn)})
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	if s.messagesHistoryLength == 0 {
+		return nil, time.Time{}, nil // thread verified; caller requested no history
 	}
 
 	var events []*adksession.Event
 	var lastTime time.Time
-	for _, msg := range rawMsgs {
+	for _, msg := range resp.GetMessages() {
 		if msg == nil {
 			continue
 		}
 
-		role := s.unmapRole(msg.Role)
+		role := s.roleToADK(msg.Role)
 		evt := adksession.NewEvent(derefOrEmpty(msg.UUID))
 		evt.Author = role
 
@@ -321,7 +330,7 @@ func (s *SessionService) fetchHistory(ctx context.Context, sessionID string) ([]
 
 		content := msg.Content
 
-		if s.timeHarnessEnabled {
+		if s.timeHarnessEnabled() {
 			if msg.CreatedAt == nil {
 				return nil, time.Time{}, fmt.Errorf(
 					"zep: TimeHarness enabled but message %s has nil CreatedAt",
@@ -352,14 +361,14 @@ func (s *SessionService) fetchHistory(ctx context.Context, sessionID string) ([]
 	return events, lastTime, nil
 }
 
-// resolveLocation returns the timezone for header formatting.
-// Returns (nil, nil) when TimeHarness is disabled — callers must
-// branch on that case. Returns an error when TimeHarness is enabled
-// but the timezone is unresolvable.
+// timeHarnessEnabled reports whether time-awareness is configured.
+func (s *SessionService) timeHarnessEnabled() bool {
+	return s.timeHarnessFromContext || s.timeHarnessStaticLoc != nil
+}
+
+// resolveLocation returns the timezone for header formatting. It assumes
+// time-awareness is enabled.
 func (s *SessionService) resolveLocation(ctx context.Context) (*time.Location, error) {
-	if !s.timeHarnessEnabled {
-		return nil, nil
-	}
 	if !s.timeHarnessFromContext {
 		return s.timeHarnessStaticLoc, nil
 	}
@@ -374,8 +383,8 @@ func (s *SessionService) resolveLocation(ctx context.Context) (*time.Location, e
 	return loc, nil
 }
 
-func (s *SessionService) buildPreamble() string {
-	if s.timeHarnessEnabled {
+func (s *SessionService) buildMessagesHistoryPreamble() string {
+	if s.timeHarnessEnabled() {
 		return `[MESSAGES_HISTORY_FORMAT]
 The conversation history below uses this format:
 
@@ -403,8 +412,8 @@ with raw message content only.
 [/MESSAGES_HISTORY_FORMAT]`
 }
 
-func (s *SessionService) buildPostamble() string {
-	if s.timeHarnessEnabled {
+func (s *SessionService) buildMessagesHistoryPostamble() string {
+	if s.timeHarnessEnabled() {
 		return `[CRITICAL_FORMAT_REMINDER]
 CRITICAL: Do not respond using the [YYYY-MM-DD HH:MM Name] format. Output
 raw message content only.
@@ -459,7 +468,7 @@ func formatElapsed(d time.Duration) string {
 	return fmt.Sprintf("%d days %d hours %d minutes", days, h, m)
 }
 
-func (s *SessionService) unmapRole(role zep.RoleType) string {
+func (s *SessionService) roleToADK(role zep.RoleType) string {
 	if role == zep.RoleTypeUserRole {
 		return "user"
 	}
@@ -552,3 +561,8 @@ func (e zepEvents) At(i int) *adksession.Event {
 	}
 	return e[i]
 }
+
+var (
+	_ threadClient = (*threadclient.Client)(nil)
+	_ userClient   = (*userclient.Client)(nil)
+)

@@ -23,7 +23,7 @@ func main() {
 	svc := zep.NewSessionService(
 		zepClient,
 		"my-agent",
-		zep.WithContextHistoryLength(10),
+		zep.WithMessagesHistoryLength(10),
 		zep.WithKnowledgeContext(nil),
 	)
 
@@ -39,7 +39,7 @@ func main() {
 
 	ctx := context.Background()
 	userID := "user-456"
-	
+
 	// In this pattern, SessionID = UserID for deterministic one-thread-per-user apps.
 	sessionID := userID
 

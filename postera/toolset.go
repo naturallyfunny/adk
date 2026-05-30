@@ -2,12 +2,21 @@ package postera
 
 import (
 	"errors"
+	"time"
 
 	adktool "google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 
+	"go.naturallyfunny.dev/postera"
 	"go.naturallyfunny.dev/postera/agent"
 )
+
+type posterumView struct {
+	ID        string `json:"id"`
+	Message   string `json:"message"`
+	TriggerAt string `json:"trigger_at"`
+	CreatedAt string `json:"created_at"`
+}
 
 type createArgs struct {
 	Message   string `json:"message"`
@@ -22,7 +31,7 @@ type listArgs struct {
 type listIncomingArgs struct{}
 
 type listOutput struct {
-	Entries []agent.PosterumView `json:"entries"`
+	Entries []posterumView `json:"entries"`
 }
 
 func Tools(ts *agent.ToolSet) ([]adktool.Tool, error) {
@@ -59,15 +68,15 @@ BAD message EXAMPLES:
 - "Follow up" — too vague, no context for future self
 - "Reminder" — not actionable, missing all substance`,
 		},
-		func(toolCtx adktool.Context, in createArgs) (agent.PosterumView, error) {
+		func(toolCtx adktool.Context, in createArgs) (posterumView, error) {
 			p, err := ts.Create(toolCtx, agent.CreateArgs{
 				Message:   in.Message,
 				TriggerAt: in.TriggerAt,
 			})
 			if err != nil {
-				return agent.PosterumView{}, err
+				return posterumView{}, err
 			}
-			return agent.FormatPosterum(p, ts.LocationFromContext(toolCtx)), nil
+			return toPosterumView(p, ts.LocationFromContext(toolCtx)), nil
 		},
 	)
 	if err != nil {
@@ -100,7 +109,7 @@ HOW TO USE:
 			if err != nil {
 				return listOutput{}, err
 			}
-			return listOutput{Entries: agent.FormatPosterums(entries, ts.LocationFromContext(toolCtx))}, nil
+			return listOutput{Entries: toPosterumViews(entries, ts.LocationFromContext(toolCtx))}, nil
 		},
 	)
 	if err != nil {
@@ -125,7 +134,7 @@ WHEN NOT TO USE:
 			if err != nil {
 				return listOutput{}, err
 			}
-			return listOutput{Entries: agent.FormatPosterums(entries, ts.LocationFromContext(toolCtx))}, nil
+			return listOutput{Entries: toPosterumViews(entries, ts.LocationFromContext(toolCtx))}, nil
 		},
 	)
 	if err != nil {
@@ -133,4 +142,21 @@ WHEN NOT TO USE:
 	}
 
 	return []adktool.Tool{create, list, listIncoming}, nil
+}
+
+func toPosterumView(p postera.Posterum, loc *time.Location) posterumView {
+	return posterumView{
+		ID:        p.ID,
+		Message:   p.Message,
+		TriggerAt: p.TriggerAt.In(loc).Format(agent.TimeLayout),
+		CreatedAt: p.CreatedAt.In(loc).Format(agent.TimeLayout),
+	}
+}
+
+func toPosterumViews(entries []postera.Posterum, loc *time.Location) []posterumView {
+	views := make([]posterumView, len(entries))
+	for i, entry := range entries {
+		views[i] = toPosterumView(entry, loc)
+	}
+	return views
 }

@@ -137,18 +137,19 @@ func (s *SessionService) Create(ctx context.Context, req *adksession.CreateReque
 	// including ErrSessionOwnerMismatch — when AutoCreateSession is enabled, so a
 	// cross-user request that Get rejected would otherwise fall through to
 	// thread.Create against someone else's thread, whose server-side outcome
-	// (conflict, idempotent success, or owner rebind) is undefined. Verify here
-	// that an existing thread belongs to the requester before creating. A
-	// brand-new thread returns NotFound and proceeds normally.
+	// (conflict, idempotent success, or owner rebind) is undefined. Decide the
+	// outcome here rather than depend on Zep: an existing thread must belong to
+	// the requester; a brand-new thread (NotFound) proceeds normally.
 	existing, err := s.thread.Get(ctx, req.SessionID, &zep.ThreadGetRequest{Lastn: zep.Int(1)})
-	if err != nil {
-		var notFound *zep.NotFoundError
-		if !errors.As(err, &notFound) {
-			return nil, fmt.Errorf("zep create thread (ownership precheck): %w", err)
+	switch {
+	case err == nil:
+		if err := verifyThreadOwner(existing, req.UserID); err != nil {
+			return nil, err
 		}
-		// NotFound: thread does not exist yet — safe to create below.
-	} else if err := verifyThreadOwner(existing, req.UserID); err != nil {
-		return nil, err
+	case isNotFound(err):
+		// Thread does not exist yet — safe to create below.
+	default:
+		return nil, fmt.Errorf("zep create thread (ownership precheck): %w", err)
 	}
 
 	if _, err := s.thread.Create(ctx, &zep.CreateThreadRequest{
@@ -171,8 +172,7 @@ func (s *SessionService) ensureUser(ctx context.Context, userID string) error {
 	if err == nil {
 		return nil
 	}
-	var notFound *zep.NotFoundError
-	if !errors.As(err, &notFound) {
+	if !isNotFound(err) {
 		return err
 	}
 	_, err = s.user.Add(ctx, &zep.CreateUserRequest{UserID: userID})
@@ -548,6 +548,12 @@ func parseTimestamp(s string) (time.Time, bool) {
 		return t, true
 	}
 	return time.Time{}, false
+}
+
+// isNotFound reports whether err is (or wraps) a Zep NotFound response.
+func isNotFound(err error) bool {
+	var nf *zep.NotFoundError
+	return errors.As(err, &nf)
 }
 
 // verifyThreadOwner enforces that an existing thread belongs to the requesting

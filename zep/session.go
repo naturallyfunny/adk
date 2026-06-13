@@ -132,6 +132,25 @@ func (s *SessionService) Create(ctx context.Context, req *adksession.CreateReque
 	if err := s.ensureUser(ctx, req.UserID); err != nil {
 		return nil, fmt.Errorf("zep ensure user: %w", err)
 	}
+
+	// Ownership guard. The ADK runner calls Create on ANY error from Get —
+	// including ErrSessionOwnerMismatch — when AutoCreateSession is enabled, so a
+	// cross-user request that Get rejected would otherwise fall through to
+	// thread.Create against someone else's thread, whose server-side outcome
+	// (conflict, idempotent success, or owner rebind) is undefined. Verify here
+	// that an existing thread belongs to the requester before creating. A
+	// brand-new thread returns NotFound and proceeds normally.
+	existing, err := s.thread.Get(ctx, req.SessionID, &zep.ThreadGetRequest{Lastn: zep.Int(1)})
+	if err != nil {
+		var notFound *zep.NotFoundError
+		if !errors.As(err, &notFound) {
+			return nil, fmt.Errorf("zep create thread (ownership precheck): %w", err)
+		}
+		// NotFound: thread does not exist yet — safe to create below.
+	} else if err := verifyThreadOwner(existing, req.UserID); err != nil {
+		return nil, err
+	}
+
 	if _, err := s.thread.Create(ctx, &zep.CreateThreadRequest{
 		ThreadID: req.SessionID,
 		UserID:   req.UserID,

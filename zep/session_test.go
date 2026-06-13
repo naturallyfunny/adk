@@ -21,11 +21,13 @@ const tzKey testCtxKey = "timezone"
 func ptr(s string) *string { return &s }
 
 type fakeThread struct {
-	getResp *zepgo.MessageListResponse
-	getErr  error
+	getResp     *zepgo.MessageListResponse
+	getErr      error
+	createCalls int
 }
 
 func (f *fakeThread) Create(context.Context, *zepgo.CreateThreadRequest, ...option.RequestOption) (*zepgo.Thread, error) {
+	f.createCalls++
 	return nil, nil
 }
 
@@ -586,6 +588,63 @@ func TestOwnership_VerifyOnlyPath_StillRejected(t *testing.T) {
 	_, err := svc.Get(context.Background(), ownerGetRequest("bob"))
 	if !errors.Is(err, ErrSessionOwnerMismatch) {
 		t.Fatalf("expected ErrSessionOwnerMismatch on verify-only path, got: %v", err)
+	}
+}
+
+func createRequest(userID string) *adksession.CreateRequest {
+	return &adksession.CreateRequest{
+		AppName:   "app",
+		UserID:    userID,
+		SessionID: "test-session",
+	}
+}
+
+// TestOwnership_Create_ForeignThread_Rejected covers the AutoCreateSession path:
+// the runner calls Create after Get returns ErrSessionOwnerMismatch. Create must
+// reject without ever creating the thread.
+func TestOwnership_Create_ForeignThread_Rejected(t *testing.T) {
+	ft := &fakeThread{getResp: &zepgo.MessageListResponse{UserID: ptr("alice")}}
+	svc := &SessionService{agentName: "Zee", messagesHistoryLength: 10, thread: ft, user: fakeUser{}}
+
+	_, err := svc.Create(context.Background(), createRequest("bob"))
+	if !errors.Is(err, ErrSessionOwnerMismatch) {
+		t.Fatalf("expected ErrSessionOwnerMismatch, got: %v", err)
+	}
+	if ft.createCalls != 0 {
+		t.Errorf("thread.Create must not be called for a foreign thread, got %d calls", ft.createCalls)
+	}
+}
+
+// TestOwnership_Create_NewThread_Succeeds is the legitimate AutoCreateSession
+// path: the thread does not exist (NotFound), so Create proceeds.
+func TestOwnership_Create_NewThread_Succeeds(t *testing.T) {
+	ft := &fakeThread{getErr: &zepgo.NotFoundError{}}
+	svc := &SessionService{agentName: "Zee", messagesHistoryLength: 10, thread: ft, user: fakeUser{}}
+
+	resp, err := svc.Create(context.Background(), createRequest("bob"))
+	if err != nil {
+		t.Fatalf("Create returned unexpected error for new thread: %v", err)
+	}
+	if ft.createCalls != 1 {
+		t.Errorf("expected thread.Create to be called once, got %d", ft.createCalls)
+	}
+	if resp.Session.UserID() != "bob" {
+		t.Errorf("expected session bound to bob, got %q", resp.Session.UserID())
+	}
+}
+
+// TestOwnership_Create_OwnedBySelf_Succeeds: re-creating one's own existing
+// thread is allowed.
+func TestOwnership_Create_OwnedBySelf_Succeeds(t *testing.T) {
+	ft := &fakeThread{getResp: &zepgo.MessageListResponse{UserID: ptr("alice")}}
+	svc := &SessionService{agentName: "Zee", messagesHistoryLength: 10, thread: ft, user: fakeUser{}}
+
+	_, err := svc.Create(context.Background(), createRequest("alice"))
+	if err != nil {
+		t.Fatalf("Create returned unexpected error for own thread: %v", err)
+	}
+	if ft.createCalls != 1 {
+		t.Errorf("expected thread.Create to be called once, got %d", ft.createCalls)
 	}
 }
 

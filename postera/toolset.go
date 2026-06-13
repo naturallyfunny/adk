@@ -44,32 +44,29 @@ func Tools(p *postera.Postarius) ([]adktool.Tool, error) {
 
 	create, err := functiontool.New(
 		functiontool.Config{
-			Name: "schedule_recall",
-			Description: `Schedule a message to your future self that Postera (Your Agentic Self Recall System) will trigger at a precise date and time.
+			Name: "wake_future_self",
+			Description: `Send a message forward to your future self — a posterum. Postera, your prospective memory, delivers it back at the exact moment you name, waking you to act then. Your own initiative, not a reminder or alarm you set for the human.
 
 WHEN TO USE:
-- You need to follow up on something at a specific future time
-- The human asks you to remind them or check in on something later
-- A task or decision needs to be revisited at a defined point in the future
-- You want to ensure continuity of a plan across sessions
+- You want to come back to something yourself at a specific later moment
+- The human asks you to follow up or check in down the line
+- A task or decision needs revisiting at a defined future point
+- You want to carry a plan across sessions, so it survives the gap
 
 HOW TO USE:
-- Write message as a clear, self-contained instruction to your future self.
-  Assume your future self has no memory of the current conversation.
-  Include all the context needed to act: who, what, and why.
-- Provide trigger_at as an ISO 8601 datetime without a timezone suffix
-  (e.g. "2026-05-07T22:00:00"). Time is always localized consistently
-  across human, you (agent), and Postera — no conversion needed.
+- message: a self-contained note to your future self, who recalls nothing
+  of this conversation — include the who, what, and why to act on it cold.
+- trigger_at: ISO 8601 with no timezone suffix (e.g. "2026-05-07T22:00:00").
+  Time is localized consistently across you, the human, and Postera, so no
+  conversion is needed.
 
-GOOD message EXAMPLES:
-- "Follow up with the human on whether they submitted the Q3 report they
-   mentioned. They were waiting on approval from their manager."
-- "Check in on the deployment scheduled for this morning. Ask the human
-   if it succeeded and whether any issues came up."
+VOICE: First person and matter-of-fact, as something you simply choose to
+do — "okay, I'll come back to this tomorrow", "I'll pick this up after the
+deploy." Not a reminder, alarm, or calendar entry; you are planning to return.
 
-BAD message EXAMPLES:
-- "Follow up" — too vague, no context for future self
-- "Reminder" — not actionable, missing all substance`,
+GOOD message: "Follow up on whether the human submitted the Q3 report they
+mentioned; they were waiting on their manager's approval." — carries the
+who/what/why. BAD: "Follow up" (too vague) or "Reminder" (not actionable).`,
 		},
 		func(toolCtx adktool.Context, in createArgs) (posterumView, error) {
 			pstr, err := p.Create(toolCtx, postera.CreateArgs{
@@ -88,13 +85,13 @@ BAD message EXAMPLES:
 
 	listUpcoming, err := functiontool.New(
 		functiontool.Config{
-			Name: "list_upcoming_recalls",
-			Description: `List all recalls scheduled to trigger from this moment onward.
+			Name: "list_upcoming_wakes",
+			Description: `See your upcoming postera (list of posterums) — the messages your future self is set to wake on, from now onward.
 
 WHEN TO USE:
-- The human asks what is coming up or what future recalls are pending
-- You want to confirm to the human what is still in schedule
-- You need a recall's id before cancelling it with cancel_recall`,
+- The human asks what is coming up, or what you have lined up to act on later
+- You want to confirm to yourself or the human what you are still set to wake on
+- You need a wake's id before cancelling it with cancel_upcoming_wake`,
 		},
 		func(toolCtx adktool.Context, _ listUpcomingArgs) (listOutput, error) {
 			entries, err := p.ListUpcoming(toolCtx)
@@ -110,20 +107,19 @@ WHEN TO USE:
 
 	cancel, err := functiontool.New(
 		functiontool.Config{
-			Name: "cancel_recall",
-			Description: `Cancel a previously scheduled recall so it will no longer trigger.
+			Name: "cancel_upcoming_wake",
+			Description: `Call off an upcoming wake, so your future self is no longer woken for it.
 
 WHEN TO USE:
-- The human asks to cancel, drop, or call off a scheduled recall
-- A follow-up is no longer needed because its purpose was already resolved
-- You scheduled a recall in error and want to remove it
+- The human asks to drop something you had planned to wake on
+- A wake is no longer needed — its purpose is already resolved
+- You set one in error
 
 HOW TO USE:
-- Provide id, the recall identifier (e.g. "pstr_...") returned by
-  schedule_recall or list_upcoming_recalls.
-- If you do not know the id, call list_upcoming_recalls first to find it.
-- A recall that does not exist (or is outside the current scope) is
-  reported as not found.`,
+- id: the wake identifier (e.g. "pstr_...") from wake_future_self or
+  list_upcoming_wakes. Don't know it? Call list_upcoming_wakes first.
+- A wake that does not exist (or is outside your scope) is reported as
+  not found.`,
 		},
 		func(toolCtx adktool.Context, in cancelArgs) (cancelOutput, error) {
 			if err := p.Cancel(toolCtx, in.ID); err != nil {

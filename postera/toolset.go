@@ -42,6 +42,11 @@ func Tools(p *postera.Postarius) ([]adktool.Tool, error) {
 		return nil, errors.New("adk: Tools: postarius must not be nil")
 	}
 
+	triggerAtDoc := `trigger_at: ISO 8601 with no timezone suffix (e.g. "2026-05-07T22:00:00").`
+	if p.LocalizesFromContext() {
+		triggerAtDoc += " Time is localized consistently across you and Postera, so no conversion is needed."
+	}
+
 	create, err := functiontool.New(
 		functiontool.Config{
 			Name: "wake_future_self",
@@ -56,9 +61,7 @@ WHEN TO USE:
 HOW TO USE:
 - message: a self-contained note to your future self, who recalls nothing
   of this conversation — include the who, what, and why to act on it cold.
-- trigger_at: ISO 8601 with no timezone suffix (e.g. "2026-05-07T22:00:00").
-  Time is localized consistently across you, the human, and Postera, so no
-  conversion is needed.
+- ` + triggerAtDoc + `
 
 VOICE: First person and matter-of-fact, as something you simply choose to
 do — "okay, I'll come back to this tomorrow", "I'll pick this up after the

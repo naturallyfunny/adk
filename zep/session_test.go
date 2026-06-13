@@ -10,9 +10,11 @@ import (
 	"github.com/getzep/zep-go/v3/option"
 
 	adksession "google.golang.org/adk/session"
-
-	"go.naturallyfunny.dev/adk/session"
 )
+
+type testCtxKey string
+
+const tzKey testCtxKey = "timezone"
 
 // ptr returns a pointer to the given string.
 func ptr(s string) *string { return &s }
@@ -190,8 +192,8 @@ func TestHeader_FromContext_OK(t *testing.T) {
 			CreatedAt: ptr(ts),
 		},
 	}
-	svc := newTestService(msgs, WithTimeHarnessFromContext())
-	ctx := context.WithValue(context.Background(), session.TimezoneKey, "Asia/Jakarta")
+	svc := newTestService(msgs, WithTimeHarnessFromContext(tzKey))
+	ctx := context.WithValue(context.Background(), tzKey, "Asia/Jakarta")
 	events := runBuildContext(t, svc, ctx)
 
 	hist := historyEvents(events)
@@ -215,13 +217,13 @@ func TestHeader_FromContext_Missing_Errors(t *testing.T) {
 			CreatedAt: ptr(ts),
 		},
 	}
-	svc := newTestService(msgs, WithTimeHarnessFromContext())
-	// context has no TimezoneKey
+	svc := newTestService(msgs, WithTimeHarnessFromContext(tzKey))
+	// context has no timezone value
 	_, _, err := svc.buildContext(context.Background(), "test-session")
 	if err == nil {
-		t.Fatal("expected error when TimezoneKey absent, got nil")
+		t.Fatal("expected error when timezone key absent, got nil")
 	}
-	if !strings.Contains(err.Error(), "TimezoneKey absent") {
+	if !strings.Contains(err.Error(), "absent or empty") {
 		t.Errorf("error message unexpected: %v", err)
 	}
 }
@@ -236,8 +238,8 @@ func TestHeader_FromContext_InvalidTZ_Errors(t *testing.T) {
 			CreatedAt: ptr(ts),
 		},
 	}
-	svc := newTestService(msgs, WithTimeHarnessFromContext())
-	ctx := context.WithValue(context.Background(), session.TimezoneKey, "Not/AValidZone")
+	svc := newTestService(msgs, WithTimeHarnessFromContext(tzKey))
+	ctx := context.WithValue(context.Background(), tzKey, "Not/AValidZone")
 	_, _, err := svc.buildContext(ctx, "test-session")
 	if err == nil {
 		t.Fatal("expected error for invalid timezone, got nil")
@@ -440,6 +442,37 @@ func TestFormatElapsed_Buckets(t *testing.T) {
 			t.Errorf("formatElapsed(%v) = %q, want %q", c.d, got, c.want)
 		}
 	}
+}
+
+func TestCurrentTime_Anchor_ContainsFraming(t *testing.T) {
+	svc := &SessionService{timeHarnessStaticLoc: time.UTC}
+
+	t.Run("empty_thread", func(t *testing.T) {
+		result := svc.buildCurrentTimeAnchor(time.UTC, time.Time{})
+		if !strings.Contains(result, "You are time-aware") {
+			t.Errorf("expected framing in empty-thread anchor, got: %q", result)
+		}
+		if !strings.Contains(result, "Current date and time:") {
+			t.Errorf("expected current date line preserved, got: %q", result)
+		}
+		if !strings.Contains(result, "[CURRENT_TIME]") {
+			t.Errorf("expected [CURRENT_TIME] tag preserved, got: %q", result)
+		}
+	})
+
+	t.Run("non_empty_thread", func(t *testing.T) {
+		lastTime := time.Now().Add(-30 * time.Minute)
+		result := svc.buildCurrentTimeAnchor(time.UTC, lastTime)
+		if !strings.Contains(result, "You are time-aware") {
+			t.Errorf("expected framing in non-empty-thread anchor, got: %q", result)
+		}
+		if !strings.Contains(result, "Time since previous message:") {
+			t.Errorf("expected elapsed line preserved, got: %q", result)
+		}
+		if !strings.Contains(result, "[CURRENT_TIME]") {
+			t.Errorf("expected [CURRENT_TIME] tag preserved, got: %q", result)
+		}
+	})
 }
 
 func TestEvents_Order_PreambleHistoryPostambleCurrentTime(t *testing.T) {

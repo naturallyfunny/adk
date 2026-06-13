@@ -16,8 +16,6 @@ import (
 	"google.golang.org/adk/model"
 	adksession "google.golang.org/adk/session"
 	"google.golang.org/genai"
-
-	"go.naturallyfunny.dev/adk/session"
 )
 
 type Option func(*SessionService)
@@ -45,8 +43,8 @@ type SessionService struct {
 	includeKnowledge         bool
 	knowledgeContextTemplate *string
 
-	timeHarnessFromContext bool
-	timeHarnessStaticLoc   *time.Location // non-nil iff static mode
+	timezoneContextKey   any            // non-nil iff from-context mode
+	timeHarnessStaticLoc *time.Location // non-nil iff static mode
 }
 
 func WithMessagesHistoryLength(n int) Option {
@@ -78,7 +76,7 @@ func WithKnowledgeContext(contextTemplateID *string) Option {
 //   - Any message with unparseable CreatedAt causes Get to return an error
 func WithTimeHarness(timezone string) Option {
 	return func(s *SessionService) {
-		s.timeHarnessFromContext = false
+		s.timezoneContextKey = nil
 		if timezone == "" {
 			s.timeHarnessStaticLoc = time.UTC
 			return
@@ -92,17 +90,19 @@ func WithTimeHarness(timezone string) Option {
 }
 
 // WithTimeHarnessFromContext enables time-awareness with per-request
-// timezone resolution. Reads session.TimezoneKey from context at fetch
-// time. If the key is absent or holds an invalid IANA timezone at
-// request time, Get returns an error.
+// timezone resolution. key is the context key under which an IANA timezone
+// string (e.g. "Asia/Jakarta") is stored on every request. If the key is
+// absent or holds an invalid IANA timezone at request time, Get returns
+// an error.
 //
-// Intended for multi-user public agents where the end-user's timezone
-// arrives via the session decorator's WithTimezoneFromContext bridge.
-//
+// Panics if key is nil (fail-fast — nil key is always a programmer error).
 // If WithTimeHarness is also called, last call wins.
-func WithTimeHarnessFromContext() Option {
+func WithTimeHarnessFromContext(key any) Option {
+	if key == nil {
+		panic("zep: WithTimeHarnessFromContext: key must not be nil")
+	}
 	return func(s *SessionService) {
-		s.timeHarnessFromContext = true
+		s.timezoneContextKey = key
 		s.timeHarnessStaticLoc = nil
 	}
 }
@@ -363,22 +363,22 @@ func (s *SessionService) fetchHistory(ctx context.Context, sessionID string) ([]
 
 // timeHarnessEnabled reports whether time-awareness is configured.
 func (s *SessionService) timeHarnessEnabled() bool {
-	return s.timeHarnessFromContext || s.timeHarnessStaticLoc != nil
+	return s.timezoneContextKey != nil || s.timeHarnessStaticLoc != nil
 }
 
 // resolveLocation returns the timezone for header formatting. It assumes
 // time-awareness is enabled.
 func (s *SessionService) resolveLocation(ctx context.Context) (*time.Location, error) {
-	if !s.timeHarnessFromContext {
+	if s.timezoneContextKey == nil {
 		return s.timeHarnessStaticLoc, nil
 	}
-	tz, ok := session.TimezoneFromContext(ctx)
-	if !ok {
-		return nil, fmt.Errorf("zep: TimeHarnessFromContext active but session.TimezoneKey absent in context")
+	tz, _ := ctx.Value(s.timezoneContextKey).(string)
+	if tz == "" {
+		return nil, fmt.Errorf("zep: WithTimeHarnessFromContext active but context key %v absent or empty", s.timezoneContextKey)
 	}
 	loc, err := time.LoadLocation(tz)
 	if err != nil {
-		return nil, fmt.Errorf("zep: TimeHarnessFromContext: invalid timezone %q: %w", tz, err)
+		return nil, fmt.Errorf("zep: WithTimeHarnessFromContext: invalid timezone %q: %w", tz, err)
 	}
 	return loc, nil
 }
@@ -425,18 +425,25 @@ content only.
 [/CRITICAL_FORMAT_REMINDER]`
 }
 
+const timeAwarenessFraming = "You are time-aware: the time shown above is the authoritative " +
+	"current local time. Rely on it whenever you need to know or reason about the " +
+	"current date or time — you never need to look it up elsewhere or call a tool " +
+	"to obtain it. Within this session — the conversation history above and the " +
+	"current date and time shown here — all times are already in the user's local " +
+	"timezone, so you do not need to convert or reason about timezones for them."
+
 func (s *SessionService) buildCurrentTimeAnchor(loc *time.Location, lastTime time.Time) string {
 	now := time.Now().In(loc)
 	nowStr := now.Format("2006-01-02 15:04")
 
 	if lastTime.IsZero() {
-		return fmt.Sprintf("[CURRENT_TIME]\nCurrent date and time: %s\n[/CURRENT_TIME]", nowStr)
+		return fmt.Sprintf("[CURRENT_TIME]\nCurrent date and time: %s\n\n%s\n[/CURRENT_TIME]", nowStr, timeAwarenessFraming)
 	}
 
 	elapsed := time.Since(lastTime)
 	return fmt.Sprintf(
-		"[CURRENT_TIME]\nCurrent date and time: %s\nTime since previous message: %s\n[/CURRENT_TIME]",
-		nowStr, formatElapsed(elapsed))
+		"[CURRENT_TIME]\nCurrent date and time: %s\nTime since previous message: %s\n\n%s\n[/CURRENT_TIME]",
+		nowStr, formatElapsed(elapsed), timeAwarenessFraming)
 }
 
 // formatElapsed returns a human-readable duration.

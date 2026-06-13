@@ -14,20 +14,14 @@ type ctxKey string
 const TimezoneKey ctxKey = "timezone"
 
 func main() {
-	// Assume baseSvc is an existing session implementation (like Zep)
+	// Assume baseSvc is an existing session implementation (like Zep).
+	// Timezone is passed directly to the base service (e.g. zep.WithTimeHarnessFromContext(TimezoneKey))
+	// rather than bridged through the decorator.
 	var baseSvc adksession.Service = &mockService{}
 
-	// Enhance the session service with specific middleware and options
+	// Wrap with persistence controls.
 	svc := session.Wrap(baseSvc,
-		// Disable storing user messages in the database (privacy focused)
 		session.WithoutUserMessagePersistence(),
-
-		// Enforce a specific system-level policy
-		session.WithPolicy("Only provide answers based on medical facts."),
-
-		// Bridge caller's timezone context key into session.TimezoneKey so
-		// history timestamps are localised to the user's timezone.
-		session.WithTimezoneFromContext(TimezoneKey),
 	)
 
 	// Context carrying the user's timezone (typically set by HTTP middleware)
@@ -38,7 +32,7 @@ func main() {
 		UserID:    "user-abc",
 	})
 
-	fmt.Printf("Session is active with middleware: %s\n", resp.Session.ID())
+	fmt.Printf("Session is active: %s\n", resp.Session.ID())
 }
 
 // Mock service for demonstration purposes

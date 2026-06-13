@@ -8,7 +8,6 @@ import (
 	"google.golang.org/adk/tool/functiontool"
 
 	"go.naturallyfunny.dev/postera"
-	"go.naturallyfunny.dev/postera/agent"
 )
 
 type posterumView struct {
@@ -23,20 +22,24 @@ type createArgs struct {
 	TriggerAt string `json:"trigger_at"`
 }
 
-type listArgs struct {
-	From string `json:"from"`
-	To   string `json:"to"`
-}
-
-type listIncomingArgs struct{}
+type listUpcomingArgs struct{}
 
 type listOutput struct {
 	Entries []posterumView `json:"entries"`
 }
 
-func Tools(ts *agent.ToolSet) ([]adktool.Tool, error) {
-	if ts == nil {
-		return nil, errors.New("adk: Tools: ts must not be nil")
+type cancelArgs struct {
+	ID string `json:"id"`
+}
+
+type cancelOutput struct {
+	ID        string `json:"id"`
+	Cancelled bool   `json:"cancelled"`
+}
+
+func Tools(p *postera.Postarius) ([]adktool.Tool, error) {
+	if p == nil {
+		return nil, errors.New("adk: Tools: postarius must not be nil")
 	}
 
 	create, err := functiontool.New(
@@ -69,54 +72,21 @@ BAD message EXAMPLES:
 - "Reminder" — not actionable, missing all substance`,
 		},
 		func(toolCtx adktool.Context, in createArgs) (posterumView, error) {
-			p, err := ts.Create(toolCtx, agent.CreateArgs{
+			pstr, err := p.Create(toolCtx, postera.CreateArgs{
 				Message:   in.Message,
 				TriggerAt: in.TriggerAt,
 			})
 			if err != nil {
 				return posterumView{}, err
 			}
-			return toPosterumView(p, ts.LocationFromContext(toolCtx)), nil
+			return toPosterumView(pstr, p.LocationFromContext(toolCtx)), nil
 		},
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	list, err := functiontool.New(
-		functiontool.Config{
-			Name: "list_recalls",
-			Description: `List recalls scheduled within an optional time window.
-
-WHEN TO USE:
-- The human asks what recalls are scheduled in a given period
-- You want to check whether a recall already exists before scheduling
-  a new one to avoid duplicates
-
-HOW TO USE:
-- Provide from and/or to as ISO 8601 datetimes without a timezone suffix
-  (e.g. "2026-05-07T09:00:00"). No conversion needed — time is localized
-  consistently across human, you (agent), and Postera.
-- Leave from empty to retrieve all recalls up to the to bound.
-- Leave to empty to retrieve all recalls from the from bound onward.
-- Leave both empty to retrieve all recalls ever scheduled.`,
-		},
-		func(toolCtx adktool.Context, in listArgs) (listOutput, error) {
-			entries, err := ts.List(toolCtx, agent.ListArgs{
-				From: in.From,
-				To:   in.To,
-			})
-			if err != nil {
-				return listOutput{}, err
-			}
-			return listOutput{Entries: toPosterumViews(entries, ts.LocationFromContext(toolCtx))}, nil
-		},
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	listIncoming, err := functiontool.New(
+	listUpcoming, err := functiontool.New(
 		functiontool.Config{
 			Name: "list_upcoming_recalls",
 			Description: `List all recalls scheduled to trigger from this moment onward.
@@ -124,32 +94,57 @@ HOW TO USE:
 WHEN TO USE:
 - The human asks what is coming up or what future recalls are pending
 - You want to confirm to the human what is still in schedule
-
-WHEN NOT TO USE:
-- When the human wants to see past recalls — use list_recalls with a to
-  bound in the past instead`,
+- You need a recall's id before cancelling it with cancel_recall`,
 		},
-		func(toolCtx adktool.Context, _ listIncomingArgs) (listOutput, error) {
-			entries, err := ts.ListIncoming(toolCtx)
+		func(toolCtx adktool.Context, _ listUpcomingArgs) (listOutput, error) {
+			entries, err := p.ListUpcoming(toolCtx)
 			if err != nil {
 				return listOutput{}, err
 			}
-			return listOutput{Entries: toPosterumViews(entries, ts.LocationFromContext(toolCtx))}, nil
+			return listOutput{Entries: toPosterumViews(entries, p.LocationFromContext(toolCtx))}, nil
 		},
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	return []adktool.Tool{create, list, listIncoming}, nil
+	cancel, err := functiontool.New(
+		functiontool.Config{
+			Name: "cancel_recall",
+			Description: `Cancel a previously scheduled recall so it will no longer trigger.
+
+WHEN TO USE:
+- The human asks to cancel, drop, or call off a scheduled recall
+- A follow-up is no longer needed because its purpose was already resolved
+- You scheduled a recall in error and want to remove it
+
+HOW TO USE:
+- Provide id, the recall identifier (e.g. "pstr_...") returned by
+  schedule_recall or list_upcoming_recalls.
+- If you do not know the id, call list_upcoming_recalls first to find it.
+- A recall that does not exist (or is outside the current scope) is
+  reported as not found.`,
+		},
+		func(toolCtx adktool.Context, in cancelArgs) (cancelOutput, error) {
+			if err := p.Cancel(toolCtx, in.ID); err != nil {
+				return cancelOutput{}, err
+			}
+			return cancelOutput{ID: in.ID, Cancelled: true}, nil
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return []adktool.Tool{create, listUpcoming, cancel}, nil
 }
 
 func toPosterumView(p postera.Posterum, loc *time.Location) posterumView {
 	return posterumView{
 		ID:        p.ID,
 		Message:   p.Message,
-		TriggerAt: p.TriggerAt.In(loc).Format(agent.TimeLayout),
-		CreatedAt: p.CreatedAt.In(loc).Format(agent.TimeLayout),
+		TriggerAt: p.TriggerAt.In(loc).Format(postera.TimeLayout),
+		CreatedAt: p.CreatedAt.In(loc).Format(postera.TimeLayout),
 	}
 }
 

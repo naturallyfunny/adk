@@ -2,6 +2,7 @@ package zep
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -104,7 +105,7 @@ func eventText(t *testing.T, e *adksession.Event) string {
 // runBuildContext calls buildContext and fails the test on error.
 func runBuildContext(t *testing.T, svc *SessionService, ctx context.Context) []*adksession.Event {
 	t.Helper()
-	events, _, err := svc.buildContext(ctx, "test-session")
+	events, _, err := svc.buildContext(ctx, "test-session", "")
 	if err != nil {
 		t.Fatalf("buildContext returned unexpected error: %v", err)
 	}
@@ -219,7 +220,7 @@ func TestHeader_FromContext_Missing_Errors(t *testing.T) {
 	}
 	svc := newTestService(msgs, WithTimeHarnessFromContext(tzKey))
 	// context has no timezone value
-	_, _, err := svc.buildContext(context.Background(), "test-session")
+	_, _, err := svc.buildContext(context.Background(), "test-session", "")
 	if err == nil {
 		t.Fatal("expected error when timezone key absent, got nil")
 	}
@@ -240,7 +241,7 @@ func TestHeader_FromContext_InvalidTZ_Errors(t *testing.T) {
 	}
 	svc := newTestService(msgs, WithTimeHarnessFromContext(tzKey))
 	ctx := context.WithValue(context.Background(), tzKey, "Not/AValidZone")
-	_, _, err := svc.buildContext(ctx, "test-session")
+	_, _, err := svc.buildContext(ctx, "test-session", "")
 	if err == nil {
 		t.Fatal("expected error for invalid timezone, got nil")
 	}
@@ -260,7 +261,7 @@ func TestHeader_TimeHarnessOn_BadTimestamp_Errors(t *testing.T) {
 		},
 	}
 	svc := newTestService(msgs, WithTimeHarness(""))
-	_, _, err := svc.buildContext(context.Background(), "test-session")
+	_, _, err := svc.buildContext(context.Background(), "test-session", "")
 	if err == nil {
 		t.Fatal("expected error for unparseable CreatedAt with TimeHarness on, got nil")
 	}
@@ -280,7 +281,7 @@ func TestHeader_TimeHarnessOff_BadTimestamp_NoError(t *testing.T) {
 		},
 	}
 	svc := newTestService(msgs) // no TimeHarness
-	events, _, err := svc.buildContext(context.Background(), "test-session")
+	events, _, err := svc.buildContext(context.Background(), "test-session", "")
 	if err != nil {
 		t.Fatalf("expected no error with TimeHarness off and bad timestamp, got: %v", err)
 	}
@@ -473,6 +474,119 @@ func TestCurrentTime_Anchor_ContainsFraming(t *testing.T) {
 			t.Errorf("expected [CURRENT_TIME] tag preserved, got: %q", result)
 		}
 	})
+}
+
+// newOwnershipService builds a SessionService whose fake thread returns resp
+// and err from Get. ownerID is the user the thread is reported to belong to;
+// pass "" to omit the owner field (simulating a missing UserID in the response).
+func newOwnershipService(t *testing.T, ownerID string, msgs []*zepgo.Message, getErr error, opts ...Option) *SessionService {
+	t.Helper()
+	var resp *zepgo.MessageListResponse
+	if getErr == nil {
+		resp = &zepgo.MessageListResponse{Messages: msgs}
+		if ownerID != "" {
+			resp.UserID = ptr(ownerID)
+		}
+	}
+	s := &SessionService{
+		agentName:             "Zee",
+		messagesHistoryLength: 10,
+		thread:                &fakeThread{getResp: resp, getErr: getErr},
+		user:                  fakeUser{},
+	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+func ownerGetRequest(userID string) *adksession.GetRequest {
+	return &adksession.GetRequest{
+		AppName:   "app",
+		UserID:    userID,
+		SessionID: "test-session",
+	}
+}
+
+// sessionEvents collects a session's events into a slice for the historyEvents helper.
+func sessionEvents(sess adksession.Session) []*adksession.Event {
+	var out []*adksession.Event
+	for e := range sess.Events().All() {
+		out = append(out, e)
+	}
+	return out
+}
+
+func TestOwnership_OwnerMatches_Succeeds(t *testing.T) {
+	msgs := []*zepgo.Message{
+		{Role: zepgo.RoleTypeUserRole, Content: "hello", Name: ptr("Alice")},
+	}
+	svc := newOwnershipService(t, "alice", msgs, nil)
+
+	resp, err := svc.Get(context.Background(), ownerGetRequest("alice"))
+	if err != nil {
+		t.Fatalf("Get returned unexpected error: %v", err)
+	}
+	hist := historyEvents(sessionEvents(resp.Session))
+	if len(hist) != 1 {
+		t.Fatalf("expected 1 history event, got %d", len(hist))
+	}
+}
+
+func TestOwnership_OwnerMismatch_Rejected(t *testing.T) {
+	msgs := []*zepgo.Message{
+		{Role: zepgo.RoleTypeUserRole, Content: "secret", Name: ptr("Alice")},
+	}
+	svc := newOwnershipService(t, "alice", msgs, nil)
+
+	resp, err := svc.Get(context.Background(), ownerGetRequest("bob"))
+	if !errors.Is(err, ErrSessionOwnerMismatch) {
+		t.Fatalf("expected ErrSessionOwnerMismatch, got: %v", err)
+	}
+	if resp != nil {
+		t.Errorf("expected nil response on mismatch, got: %+v", resp)
+	}
+}
+
+func TestOwnership_ThreadNotFound_PassesErrorThrough(t *testing.T) {
+	notFound := &zepgo.NotFoundError{}
+	svc := newOwnershipService(t, "", nil, notFound)
+
+	_, err := svc.Get(context.Background(), ownerGetRequest("bob"))
+	if err == nil {
+		t.Fatal("expected error for missing thread, got nil")
+	}
+	if errors.Is(err, ErrSessionOwnerMismatch) {
+		t.Fatalf("not-found must not be reported as ownership mismatch: %v", err)
+	}
+}
+
+func TestOwnership_EmptyOwnerInResponse_FailClosed(t *testing.T) {
+	msgs := []*zepgo.Message{
+		{Role: zepgo.RoleTypeUserRole, Content: "secret", Name: ptr("Alice")},
+	}
+	// ownerID "" → response carries no UserID. An authenticated request must be
+	// rejected because ownership cannot be confirmed (fail-closed).
+	svc := newOwnershipService(t, "", msgs, nil)
+
+	_, err := svc.Get(context.Background(), ownerGetRequest("bob"))
+	if !errors.Is(err, ErrSessionOwnerMismatch) {
+		t.Fatalf("expected fail-closed ErrSessionOwnerMismatch when owner unknown, got: %v", err)
+	}
+}
+
+func TestOwnership_VerifyOnlyPath_StillRejected(t *testing.T) {
+	msgs := []*zepgo.Message{
+		{Role: zepgo.RoleTypeUserRole, Content: "secret", Name: ptr("Alice")},
+	}
+	// messagesHistoryLength == 0 → the verify-only Get path. The guard must run
+	// before the early return.
+	svc := newOwnershipService(t, "alice", msgs, nil, WithMessagesHistoryLength(0))
+
+	_, err := svc.Get(context.Background(), ownerGetRequest("bob"))
+	if !errors.Is(err, ErrSessionOwnerMismatch) {
+		t.Fatalf("expected ErrSessionOwnerMismatch on verify-only path, got: %v", err)
+	}
 }
 
 func TestEvents_Order_PreambleHistoryPostambleCurrentTime(t *testing.T) {

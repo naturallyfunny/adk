@@ -18,6 +18,11 @@ import (
 	"google.golang.org/genai"
 )
 
+// ErrSessionOwnerMismatch is returned by Get when the requesting user is not
+// the owner of the requested thread. Callers (e.g. an HTTP handler) should map
+// it to 403 Forbidden.
+var ErrSessionOwnerMismatch = errors.New("zep: session does not belong to user")
+
 type Option func(*SessionService)
 
 // threadClient is the slice of zep thread functionality this service needs.
@@ -220,7 +225,7 @@ func (s *SessionService) Get(ctx context.Context, req *adksession.GetRequest) (*
 		app:    req.AppName,
 	}
 
-	events, lastTime, err := s.buildContext(ctx, req.SessionID)
+	events, lastTime, err := s.buildContext(ctx, req.SessionID, req.UserID)
 	if err != nil {
 		return nil, err
 	}
@@ -231,7 +236,7 @@ func (s *SessionService) Get(ctx context.Context, req *adksession.GetRequest) (*
 	return &adksession.GetResponse{Session: sess}, nil
 }
 
-func (s *SessionService) buildContext(ctx context.Context, sessionID string) ([]*adksession.Event, time.Time, error) {
+func (s *SessionService) buildContext(ctx context.Context, sessionID, expectedUserID string) ([]*adksession.Event, time.Time, error) {
 	var events []*adksession.Event
 
 	if s.includeKnowledge {
@@ -242,7 +247,8 @@ func (s *SessionService) buildContext(ctx context.Context, sessionID string) ([]
 
 	// fetchHistory is always called: it verifies the thread exists in Zep,
 	// which lets the ADK runner trigger Create (via autoCreateSession) when needed.
-	history, lastTime, err := s.fetchHistory(ctx, sessionID)
+	// It also enforces the ownership guard against expectedUserID.
+	history, lastTime, err := s.fetchHistory(ctx, sessionID, expectedUserID)
 	if err != nil {
 		return nil, time.Time{}, err
 	}
@@ -284,7 +290,7 @@ func (s *SessionService) fetchKnowledge(ctx context.Context, sessionID string, t
 	return fmt.Sprintf("[SYSTEM_RETRIEVED_RELATED_KNOWLEDGE]\n%s\n[/SYSTEM_RETRIEVED_RELATED_KNOWLEDGE]", ctxStr)
 }
 
-func (s *SessionService) fetchHistory(ctx context.Context, sessionID string) ([]*adksession.Event, time.Time, error) {
+func (s *SessionService) fetchHistory(ctx context.Context, sessionID, expectedUserID string) ([]*adksession.Event, time.Time, error) {
 	lastn := s.messagesHistoryLength
 	if lastn == 0 {
 		lastn = 1 // minimum fetch to verify the thread exists in Zep
@@ -303,6 +309,16 @@ func (s *SessionService) fetchHistory(ctx context.Context, sessionID string) ([]
 	if err != nil {
 		return nil, time.Time{}, err
 	}
+
+	// Ownership guard: an existing thread must belong to the requesting user.
+	// A nonexistent thread returns NotFound above (before this point), so the
+	// AutoCreateSession path — which binds the thread to req.UserID — is never
+	// blocked here. The guard runs before the messagesHistoryLength == 0 early
+	// return so the verify-only path is protected too.
+	if err := verifyThreadOwner(resp, expectedUserID); err != nil {
+		return nil, time.Time{}, err
+	}
+
 	if s.messagesHistoryLength == 0 {
 		return nil, time.Time{}, nil // thread verified; caller requested no history
 	}
@@ -513,6 +529,25 @@ func parseTimestamp(s string) (time.Time, bool) {
 		return t, true
 	}
 	return time.Time{}, false
+}
+
+// verifyThreadOwner enforces that an existing thread belongs to the requesting
+// user. It runs only when expectedUserID is non-empty (an authenticated
+// request carries a user identity); requests without an identity — internal
+// callers, tests — are not gated.
+//
+// It is fail-closed: when a user identity is present but Zep does not report a
+// thread owner, ownership cannot be confirmed and access is denied. This is the
+// security path, so an unconfirmable owner is treated as a mismatch rather than
+// waved through.
+func verifyThreadOwner(resp *zep.MessageListResponse, expectedUserID string) error {
+	if expectedUserID == "" {
+		return nil
+	}
+	if derefOrEmpty(resp.GetUserID()) != expectedUserID {
+		return ErrSessionOwnerMismatch
+	}
+	return nil
 }
 
 func derefOrEmpty(s *string) string {

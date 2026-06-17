@@ -1,11 +1,14 @@
 module go.naturallyfunny.dev/adk
 
-go 1.25.0
+go 1.25.1
 
 require (
 	github.com/getzep/zep-go/v3 v3.20.0
 	github.com/openai/openai-go v1.12.0
+	github.com/zmb3/spotify/v2 v2.4.3
 	go.naturallyfunny.dev/postera v0.18.0
+	go.naturallyfunny.dev/spotify v0.1.0
+	golang.org/x/oauth2 v0.36.0
 	google.golang.org/adk v1.2.0
 	google.golang.org/genai v1.54.0
 )

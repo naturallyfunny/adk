@@ -6,18 +6,18 @@ import (
 	"testing"
 
 	"go.naturallyfunny.dev/tuya"
-	"go.naturallyfunny.dev/tuya/app"
+	"go.naturallyfunny.dev/tuya/cloud"
 )
 
 // stubClient implements Client for tests that only need tool registration to succeed.
 type stubClient struct{}
 
-func (stubClient) Account(context.Context, string) (app.Account, error)       { return app.Account{}, nil }
-func (stubClient) ListDevices(context.Context, string) ([]tuya.Device, error) { return nil, nil }
-func (stubClient) DeviceStatus(context.Context, string, string) ([]tuya.DataPoint, error) {
+func (stubClient) Account(context.Context, string) (tuya.Account, error)       { return tuya.Account{}, nil }
+func (stubClient) ListDevices(context.Context, string) ([]cloud.Device, error) { return nil, nil }
+func (stubClient) DeviceStatus(context.Context, string, string) ([]cloud.DataPoint, error) {
 	return nil, nil
 }
-func (stubClient) SendCommands(context.Context, string, string, []tuya.DataPoint) error { return nil }
+func (stubClient) SendCommands(context.Context, string, string, []cloud.DataPoint) error { return nil }
 
 func TestToolsNilClient(t *testing.T) {
 	if _, err := Tools(nil); err == nil {
@@ -52,8 +52,8 @@ func TestForAgent(t *testing.T) {
 		err  error
 		want string // substring the translated error must contain
 	}{
-		{"not linked", app.ErrAccountNotLinked, "hasn't linked"},
-		{"not owned", app.ErrDeviceNotOwned, "isn't on the human's Tuya account"},
+		{"not linked", tuya.ErrAccountNotLinked, "hasn't linked"},
+		{"not owned", tuya.ErrDeviceNotOwned, "isn't on the human's Tuya account"},
 		{"passthrough", passthrough, "some other failure"},
 	}
 	for _, tt := range tests {

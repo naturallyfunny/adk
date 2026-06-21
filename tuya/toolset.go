@@ -11,17 +11,17 @@ import (
 	"google.golang.org/adk/tool/functiontool"
 
 	"go.naturallyfunny.dev/tuya"
-	"go.naturallyfunny.dev/tuya/app"
+	"go.naturallyfunny.dev/tuya/cloud"
 )
 
-// Client is the owner-keyed surface the toolset drives. app.Client satisfies it.
+// Client is the owner-keyed surface the toolset drives. tuya.Client satisfies it.
 // Every method takes the human's owner id (toolCtx.UserID()); the implementation
 // resolves the Tuya UID and enforces ownership.
 type Client interface {
-	Account(ctx context.Context, ownerID string) (app.Account, error)
-	ListDevices(ctx context.Context, ownerID string) ([]tuya.Device, error)
-	DeviceStatus(ctx context.Context, ownerID, deviceID string) ([]tuya.DataPoint, error)
-	SendCommands(ctx context.Context, ownerID, deviceID string, cmds []tuya.DataPoint) error
+	Account(ctx context.Context, ownerID string) (tuya.Account, error)
+	ListDevices(ctx context.Context, ownerID string) ([]cloud.Device, error)
+	DeviceStatus(ctx context.Context, ownerID, deviceID string) ([]cloud.DataPoint, error)
+	SendCommands(ctx context.Context, ownerID, deviceID string, cmds []cloud.DataPoint) error
 }
 
 // dataPointView is one Tuya data point (DP): a capability code and its value.
@@ -209,20 +209,20 @@ I can only drive devices on the human's own account; trying another is refused.`
 // should know what to do next.
 func forAgent(err error) error {
 	switch {
-	case errors.Is(err, app.ErrAccountNotLinked):
+	case errors.Is(err, tuya.ErrAccountNotLinked):
 		return errors.New("the human hasn't linked their Tuya account yet — they need to link it before I can see or control any device")
-	case errors.Is(err, app.ErrDeviceNotOwned):
+	case errors.Is(err, tuya.ErrDeviceNotOwned):
 		return errors.New("that device isn't on the human's Tuya account — I can only act on their own devices; double-check the id with list_devices")
 	default:
 		return err
 	}
 }
 
-func toDataPointView(d tuya.DataPoint) dataPointView {
+func toDataPointView(d cloud.DataPoint) dataPointView {
 	return dataPointView{Code: d.Code, Value: d.Value}
 }
 
-func toDataPointViews(dps []tuya.DataPoint) []dataPointView {
+func toDataPointViews(dps []cloud.DataPoint) []dataPointView {
 	views := make([]dataPointView, len(dps))
 	for i, d := range dps {
 		views[i] = toDataPointView(d)
@@ -230,15 +230,15 @@ func toDataPointViews(dps []tuya.DataPoint) []dataPointView {
 	return views
 }
 
-func toDataPoints(views []dataPointView) []tuya.DataPoint {
-	dps := make([]tuya.DataPoint, len(views))
+func toDataPoints(views []dataPointView) []cloud.DataPoint {
+	dps := make([]cloud.DataPoint, len(views))
 	for i, v := range views {
-		dps[i] = tuya.DataPoint{Code: v.Code, Value: v.Value}
+		dps[i] = cloud.DataPoint{Code: v.Code, Value: v.Value}
 	}
 	return dps
 }
 
-func toChannelViews(channels []tuya.Channel) []channelView {
+func toChannelViews(channels []cloud.Channel) []channelView {
 	views := make([]channelView, len(channels))
 	for i, ch := range channels {
 		views[i] = channelView{Identifier: ch.Identifier, Name: ch.Name}
@@ -246,7 +246,7 @@ func toChannelViews(channels []tuya.Channel) []channelView {
 	return views
 }
 
-func toDeviceViews(devices []tuya.Device) []deviceView {
+func toDeviceViews(devices []cloud.Device) []deviceView {
 	views := make([]deviceView, len(devices))
 	for i, d := range devices {
 		views[i] = deviceView{

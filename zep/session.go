@@ -18,12 +18,11 @@ import (
 	"google.golang.org/genai"
 )
 
-// ErrSessionOwnerMismatch is returned by Get when the requesting user is not
-// the owner of the requested thread. Callers (e.g. an HTTP handler) should map
-// it to 403 Forbidden.
-var ErrSessionOwnerMismatch = errors.New("zep: session does not belong to user")
-
-type Option func(*SessionService)
+// userClient is the slice of zep user functionality this service needs.
+type userClient interface {
+	Get(ctx context.Context, userID string, opts ...option.RequestOption) (*zep.User, error)
+	Add(ctx context.Context, request *zep.CreateUserRequest, opts ...option.RequestOption) (*zep.User, error)
+}
 
 // threadClient is the slice of zep thread functionality this service needs.
 type threadClient interface {
@@ -31,12 +30,6 @@ type threadClient interface {
 	AddMessages(ctx context.Context, threadID string, request *zep.AddThreadMessagesRequest, opts ...option.RequestOption) (*zep.AddThreadMessagesResponse, error)
 	Get(ctx context.Context, threadID string, request *zep.ThreadGetRequest, opts ...option.RequestOption) (*zep.MessageListResponse, error)
 	GetUserContext(ctx context.Context, threadID string, request *zep.ThreadGetUserContextRequest, opts ...option.RequestOption) (*zep.ThreadContextResponse, error)
-}
-
-// userClient is the slice of zep user functionality this service needs.
-type userClient interface {
-	Get(ctx context.Context, userID string, opts ...option.RequestOption) (*zep.User, error)
-	Add(ctx context.Context, request *zep.CreateUserRequest, opts ...option.RequestOption) (*zep.User, error)
 }
 
 type SessionService struct {
@@ -50,6 +43,24 @@ type SessionService struct {
 
 	timezoneContextKey   any            // non-nil iff from-context mode
 	timeHarnessStaticLoc *time.Location // non-nil iff static mode
+}
+
+type Option func(*SessionService)
+
+func NewSessionService(c *client.Client, agentName string, opts ...Option) *SessionService {
+	s := &SessionService{
+		agentName:             agentName,
+		messagesHistoryLength: 0,
+		includeKnowledge:      false,
+	}
+	if c != nil {
+		s.thread = c.Thread
+		s.user = c.User
+	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 func WithMessagesHistoryLength(n int) Option {
@@ -112,21 +123,101 @@ func WithTimeHarnessFromContext(key any) Option {
 	}
 }
 
-func NewSessionService(c *client.Client, agentName string, opts ...Option) *SessionService {
-	s := &SessionService{
-		agentName:             agentName,
-		messagesHistoryLength: 0,
-		includeKnowledge:      false,
-	}
-	if c != nil {
-		s.thread = c.Thread
-		s.user = c.User
-	}
-	for _, opt := range opts {
-		opt(s)
-	}
-	return s
+// isNotFound reports whether err is (or wraps) a Zep NotFound response.
+func isNotFound(err error) bool {
+	var nf *zep.NotFoundError
+	return errors.As(err, &nf)
 }
+
+func (s *SessionService) ensureUser(ctx context.Context, userID string) error {
+	_, err := s.user.Get(ctx, userID)
+	if err == nil {
+		return nil
+	}
+	if !isNotFound(err) {
+		return err
+	}
+	_, err = s.user.Add(ctx, &zep.CreateUserRequest{UserID: userID})
+	return err
+}
+
+// ErrSessionOwnerMismatch is returned by Get when the requesting user is not
+// the owner of the requested thread. Callers (e.g. an HTTP handler) should map
+// it to 403 Forbidden.
+var ErrSessionOwnerMismatch = errors.New("zep: session does not belong to user")
+
+func derefOrEmpty(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+// verifyThreadOwner enforces that an existing thread belongs to the requesting
+// user. It runs only when expectedUserID is non-empty (an authenticated
+// request carries a user identity); requests without an identity — internal
+// callers, tests — are not gated.
+//
+// It is fail-closed: when a user identity is present but Zep does not report a
+// thread owner, ownership cannot be confirmed and access is denied. This is the
+// security path, so an unconfirmable owner is treated as a mismatch rather than
+// waved through.
+func verifyThreadOwner(resp *zep.MessageListResponse, expectedUserID string) error {
+	if expectedUserID == "" {
+		return nil
+	}
+	if derefOrEmpty(resp.GetUserID()) != expectedUserID {
+		return ErrSessionOwnerMismatch
+	}
+	return nil
+}
+
+type zepState struct{}
+
+func (zepState) Get(_ string) (any, error)   { return nil, adksession.ErrStateKeyNotExist }
+func (zepState) Set(_ string, _ any) error   { return nil }
+func (zepState) All() iter.Seq2[string, any] { return func(func(string, any) bool) {} }
+
+type zepEvents []*adksession.Event
+
+func (e zepEvents) All() iter.Seq[*adksession.Event] {
+	return func(yield func(*adksession.Event) bool) {
+		for _, evt := range e {
+			if !yield(evt) {
+				return
+			}
+		}
+	}
+}
+
+func (e zepEvents) Len() int { return len(e) }
+
+func (e zepEvents) At(i int) *adksession.Event {
+	if i < 0 || i >= len(e) {
+		return nil
+	}
+	return e[i]
+}
+
+type zepSession struct {
+	id         string
+	userID     string
+	app        string
+	events     []*adksession.Event
+	lastUpdate time.Time // zero if no timestamped messages were fetched
+}
+
+func (z *zepSession) ID() string      { return z.id }
+func (z *zepSession) AppName() string { return z.app }
+func (z *zepSession) UserID() string  { return z.userID }
+
+// LastUpdateTime returns the timestamp of the most recent message fetched from
+// Zep. Returns zero time.Time{} when no messages carry a parseable CreatedAt
+// (e.g. a brand-new or empty thread).
+func (z *zepSession) LastUpdateTime() time.Time { return z.lastUpdate }
+
+func (z *zepSession) State() adksession.State   { return zepState{} }
+func (z *zepSession) Events() adksession.Events { return zepEvents(z.events) }
 
 func (s *SessionService) Create(ctx context.Context, req *adksession.CreateRequest) (*adksession.CreateResponse, error) {
 	if err := s.ensureUser(ctx, req.UserID); err != nil {
@@ -165,18 +256,6 @@ func (s *SessionService) Create(ctx context.Context, req *adksession.CreateReque
 			app:    req.AppName,
 		},
 	}, nil
-}
-
-func (s *SessionService) ensureUser(ctx context.Context, userID string) error {
-	_, err := s.user.Get(ctx, userID)
-	if err == nil {
-		return nil
-	}
-	if !isNotFound(err) {
-		return err
-	}
-	_, err = s.user.Add(ctx, &zep.CreateUserRequest{UserID: userID})
-	return err
 }
 
 func (s *SessionService) roleFromADK(role string) zep.RoleType {
@@ -237,76 +316,47 @@ func (s *SessionService) AppendEvent(ctx context.Context, sess adksession.Sessio
 	return err
 }
 
-func (s *SessionService) Get(ctx context.Context, req *adksession.GetRequest) (*adksession.GetResponse, error) {
-	sess := &zepSession{
-		id:     req.SessionID,
-		userID: req.UserID,
-		app:    req.AppName,
-	}
-
-	events, lastTime, err := s.buildContext(ctx, req.SessionID, req.UserID)
-	if err != nil {
-		return nil, err
-	}
-
-	sess.events = events
-	sess.lastUpdate = lastTime
-
-	return &adksession.GetResponse{Session: sess}, nil
+// timeHarnessEnabled reports whether time-awareness is configured.
+func (s *SessionService) timeHarnessEnabled() bool {
+	return s.timezoneContextKey != nil || s.timeHarnessStaticLoc != nil
 }
 
-func (s *SessionService) buildContext(ctx context.Context, sessionID, expectedUserID string) ([]*adksession.Event, time.Time, error) {
-	var events []*adksession.Event
-
-	if s.includeKnowledge {
-		if knowledge := s.fetchKnowledge(ctx, sessionID, s.knowledgeContextTemplate); knowledge != "" {
-			events = append(events, s.newSystemEvent("knowledge", knowledge))
-		}
+// resolveLocation returns the timezone for header formatting. It assumes
+// time-awareness is enabled.
+func (s *SessionService) resolveLocation(ctx context.Context) (*time.Location, error) {
+	if s.timezoneContextKey == nil {
+		return s.timeHarnessStaticLoc, nil
 	}
-
-	// fetchHistory is always called: it verifies the thread exists in Zep,
-	// which lets the ADK runner trigger Create (via autoCreateSession) when needed.
-	// It also enforces the ownership guard against expectedUserID.
-	history, lastTime, err := s.fetchHistory(ctx, sessionID, expectedUserID)
+	tz, _ := ctx.Value(s.timezoneContextKey).(string)
+	if tz == "" {
+		return nil, fmt.Errorf("zep: WithTimeHarnessFromContext active but context key %v absent or empty", s.timezoneContextKey)
+	}
+	loc, err := time.LoadLocation(tz)
 	if err != nil {
-		return nil, time.Time{}, err
+		return nil, fmt.Errorf("zep: WithTimeHarnessFromContext: invalid timezone %q: %w", tz, err)
 	}
-
-	if len(history) > 0 {
-		events = append(events, s.newSystemEvent("messages_history_preamble", s.buildMessagesHistoryPreamble()))
-		events = append(events, history...)
-		events = append(events, s.newSystemEvent("messages_history_postamble", s.buildMessagesHistoryPostamble()))
-	}
-
-	if s.timeHarnessEnabled() {
-		loc, err := s.resolveLocation(ctx)
-		if err != nil {
-			return nil, time.Time{}, err
-		}
-		events = append(events, s.newSystemEvent("current_time", s.buildCurrentTimeAnchor(loc, lastTime)))
-	}
-
-	return events, lastTime, nil
+	return loc, nil
 }
 
-func (s *SessionService) fetchKnowledge(ctx context.Context, sessionID string, templateID *string) string {
-	resp, err := s.thread.GetUserContext(ctx, sessionID, &zep.ThreadGetUserContextRequest{
-		TemplateID: templateID,
-	})
-	if err != nil {
-		return ""
+func (s *SessionService) roleToADK(role zep.RoleType) string {
+	if role == zep.RoleTypeUserRole {
+		return "user"
 	}
+	return s.agentName
+}
 
-	if resp == nil || resp.GetContext() == nil {
-		return ""
+// parseTimestamp tries RFC3339Nano then RFC3339. Returns false when neither
+// matches. When TimeHarness is enabled, fetchHistory treats false as a
+// hard error (invariant violation). When TimeHarness is disabled, the
+// caller path does not invoke parseTimestamp at all.
+func parseTimestamp(s string) (time.Time, bool) {
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return t, true
 	}
-
-	ctxStr := *resp.GetContext()
-	if ctxStr == "" {
-		return ""
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, true
 	}
-
-	return fmt.Sprintf("[SYSTEM_RETRIEVED_RELATED_KNOWLEDGE]\n%s\n[/SYSTEM_RETRIEVED_RELATED_KNOWLEDGE]", ctxStr)
+	return time.Time{}, false
 }
 
 func (s *SessionService) fetchHistory(ctx context.Context, sessionID, expectedUserID string) ([]*adksession.Event, time.Time, error) {
@@ -396,26 +446,35 @@ func (s *SessionService) fetchHistory(ctx context.Context, sessionID, expectedUs
 	return events, lastTime, nil
 }
 
-// timeHarnessEnabled reports whether time-awareness is configured.
-func (s *SessionService) timeHarnessEnabled() bool {
-	return s.timezoneContextKey != nil || s.timeHarnessStaticLoc != nil
+func (s *SessionService) fetchKnowledge(ctx context.Context, sessionID string, templateID *string) string {
+	resp, err := s.thread.GetUserContext(ctx, sessionID, &zep.ThreadGetUserContextRequest{
+		TemplateID: templateID,
+	})
+	if err != nil {
+		return ""
+	}
+
+	if resp == nil || resp.GetContext() == nil {
+		return ""
+	}
+
+	ctxStr := *resp.GetContext()
+	if ctxStr == "" {
+		return ""
+	}
+
+	return fmt.Sprintf("[SYSTEM_RETRIEVED_RELATED_KNOWLEDGE]\n%s\n[/SYSTEM_RETRIEVED_RELATED_KNOWLEDGE]", ctxStr)
 }
 
-// resolveLocation returns the timezone for header formatting. It assumes
-// time-awareness is enabled.
-func (s *SessionService) resolveLocation(ctx context.Context) (*time.Location, error) {
-	if s.timezoneContextKey == nil {
-		return s.timeHarnessStaticLoc, nil
+func (s *SessionService) newSystemEvent(category, content string) *adksession.Event {
+	evt := adksession.NewEvent(category)
+	evt.Author = "system"
+
+	evt.LLMResponse = model.LLMResponse{
+		Content: genai.NewContentFromText(content, genai.Role("model")),
 	}
-	tz, _ := ctx.Value(s.timezoneContextKey).(string)
-	if tz == "" {
-		return nil, fmt.Errorf("zep: WithTimeHarnessFromContext active but context key %v absent or empty", s.timezoneContextKey)
-	}
-	loc, err := time.LoadLocation(tz)
-	if err != nil {
-		return nil, fmt.Errorf("zep: WithTimeHarnessFromContext: invalid timezone %q: %w", tz, err)
-	}
-	return loc, nil
+
+	return evt
 }
 
 func (s *SessionService) buildMessagesHistoryPreamble() string {
@@ -467,20 +526,6 @@ const timeAwarenessFraming = "You are time-aware: the time shown above is the au
 	"current date and time shown here — all times are already in the user's local " +
 	"timezone, so you do not need to convert or reason about timezones for them."
 
-func (s *SessionService) buildCurrentTimeAnchor(loc *time.Location, lastTime time.Time) string {
-	now := time.Now().In(loc)
-	nowStr := now.Format("2006-01-02 15:04")
-
-	if lastTime.IsZero() {
-		return fmt.Sprintf("[CURRENT_TIME]\nCurrent date and time: %s\n\n%s\n[/CURRENT_TIME]", nowStr, timeAwarenessFraming)
-	}
-
-	elapsed := time.Since(lastTime)
-	return fmt.Sprintf(
-		"[CURRENT_TIME]\nCurrent date and time: %s\nTime since previous message: %s\n\n%s\n[/CURRENT_TIME]",
-		nowStr, formatElapsed(elapsed), timeAwarenessFraming)
-}
-
 // formatElapsed returns a human-readable duration.
 // Pluralization is always-plural by design (e.g. "1 minutes") — LLMs
 // tolerate this and avoiding plural/singular branching keeps the
@@ -510,22 +555,70 @@ func formatElapsed(d time.Duration) string {
 	return fmt.Sprintf("%d days %d hours %d minutes", days, h, m)
 }
 
-func (s *SessionService) roleToADK(role zep.RoleType) string {
-	if role == zep.RoleTypeUserRole {
-		return "user"
+func (s *SessionService) buildCurrentTimeAnchor(loc *time.Location, lastTime time.Time) string {
+	now := time.Now().In(loc)
+	nowStr := now.Format("2006-01-02 15:04")
+
+	if lastTime.IsZero() {
+		return fmt.Sprintf("[CURRENT_TIME]\nCurrent date and time: %s\n\n%s\n[/CURRENT_TIME]", nowStr, timeAwarenessFraming)
 	}
-	return s.agentName
+
+	elapsed := time.Since(lastTime)
+	return fmt.Sprintf(
+		"[CURRENT_TIME]\nCurrent date and time: %s\nTime since previous message: %s\n\n%s\n[/CURRENT_TIME]",
+		nowStr, formatElapsed(elapsed), timeAwarenessFraming)
 }
 
-func (s *SessionService) newSystemEvent(category, content string) *adksession.Event {
-	evt := adksession.NewEvent(category)
-	evt.Author = "system"
+func (s *SessionService) buildContext(ctx context.Context, sessionID, expectedUserID string) ([]*adksession.Event, time.Time, error) {
+	var events []*adksession.Event
 
-	evt.LLMResponse = model.LLMResponse{
-		Content: genai.NewContentFromText(content, genai.Role("model")),
+	if s.includeKnowledge {
+		if knowledge := s.fetchKnowledge(ctx, sessionID, s.knowledgeContextTemplate); knowledge != "" {
+			events = append(events, s.newSystemEvent("knowledge", knowledge))
+		}
 	}
 
-	return evt
+	// fetchHistory is always called: it verifies the thread exists in Zep,
+	// which lets the ADK runner trigger Create (via autoCreateSession) when needed.
+	// It also enforces the ownership guard against expectedUserID.
+	history, lastTime, err := s.fetchHistory(ctx, sessionID, expectedUserID)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+
+	if len(history) > 0 {
+		events = append(events, s.newSystemEvent("messages_history_preamble", s.buildMessagesHistoryPreamble()))
+		events = append(events, history...)
+		events = append(events, s.newSystemEvent("messages_history_postamble", s.buildMessagesHistoryPostamble()))
+	}
+
+	if s.timeHarnessEnabled() {
+		loc, err := s.resolveLocation(ctx)
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		events = append(events, s.newSystemEvent("current_time", s.buildCurrentTimeAnchor(loc, lastTime)))
+	}
+
+	return events, lastTime, nil
+}
+
+func (s *SessionService) Get(ctx context.Context, req *adksession.GetRequest) (*adksession.GetResponse, error) {
+	sess := &zepSession{
+		id:     req.SessionID,
+		userID: req.UserID,
+		app:    req.AppName,
+	}
+
+	events, lastTime, err := s.buildContext(ctx, req.SessionID, req.UserID)
+	if err != nil {
+		return nil, err
+	}
+
+	sess.events = events
+	sess.lastUpdate = lastTime
+
+	return &adksession.GetResponse{Session: sess}, nil
 }
 
 func (s *SessionService) List(_ context.Context, _ *adksession.ListRequest) (*adksession.ListResponse, error) {
@@ -534,99 +627,6 @@ func (s *SessionService) List(_ context.Context, _ *adksession.ListRequest) (*ad
 
 func (s *SessionService) Delete(_ context.Context, _ *adksession.DeleteRequest) error {
 	return nil
-}
-
-// parseTimestamp tries RFC3339Nano then RFC3339. Returns false when neither
-// matches. When TimeHarness is enabled, fetchHistory treats false as a
-// hard error (invariant violation). When TimeHarness is disabled, the
-// caller path does not invoke parseTimestamp at all.
-func parseTimestamp(s string) (time.Time, bool) {
-	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
-		return t, true
-	}
-	if t, err := time.Parse(time.RFC3339, s); err == nil {
-		return t, true
-	}
-	return time.Time{}, false
-}
-
-// isNotFound reports whether err is (or wraps) a Zep NotFound response.
-func isNotFound(err error) bool {
-	var nf *zep.NotFoundError
-	return errors.As(err, &nf)
-}
-
-// verifyThreadOwner enforces that an existing thread belongs to the requesting
-// user. It runs only when expectedUserID is non-empty (an authenticated
-// request carries a user identity); requests without an identity — internal
-// callers, tests — are not gated.
-//
-// It is fail-closed: when a user identity is present but Zep does not report a
-// thread owner, ownership cannot be confirmed and access is denied. This is the
-// security path, so an unconfirmable owner is treated as a mismatch rather than
-// waved through.
-func verifyThreadOwner(resp *zep.MessageListResponse, expectedUserID string) error {
-	if expectedUserID == "" {
-		return nil
-	}
-	if derefOrEmpty(resp.GetUserID()) != expectedUserID {
-		return ErrSessionOwnerMismatch
-	}
-	return nil
-}
-
-func derefOrEmpty(s *string) string {
-	if s == nil {
-		return ""
-	}
-	return *s
-}
-
-type zepSession struct {
-	id         string
-	userID     string
-	app        string
-	events     []*adksession.Event
-	lastUpdate time.Time // zero if no timestamped messages were fetched
-}
-
-func (z *zepSession) ID() string      { return z.id }
-func (z *zepSession) AppName() string { return z.app }
-func (z *zepSession) UserID() string  { return z.userID }
-
-// LastUpdateTime returns the timestamp of the most recent message fetched from
-// Zep. Returns zero time.Time{} when no messages carry a parseable CreatedAt
-// (e.g. a brand-new or empty thread).
-func (z *zepSession) LastUpdateTime() time.Time { return z.lastUpdate }
-
-func (z *zepSession) State() adksession.State   { return zepState{} }
-func (z *zepSession) Events() adksession.Events { return zepEvents(z.events) }
-
-type zepState struct{}
-
-func (zepState) Get(_ string) (any, error)   { return nil, adksession.ErrStateKeyNotExist }
-func (zepState) Set(_ string, _ any) error   { return nil }
-func (zepState) All() iter.Seq2[string, any] { return func(func(string, any) bool) {} }
-
-type zepEvents []*adksession.Event
-
-func (e zepEvents) All() iter.Seq[*adksession.Event] {
-	return func(yield func(*adksession.Event) bool) {
-		for _, evt := range e {
-			if !yield(evt) {
-				return
-			}
-		}
-	}
-}
-
-func (e zepEvents) Len() int { return len(e) }
-
-func (e zepEvents) At(i int) *adksession.Event {
-	if i < 0 || i >= len(e) {
-		return nil
-	}
-	return e[i]
 }
 
 var (

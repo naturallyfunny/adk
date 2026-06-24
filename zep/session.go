@@ -33,25 +33,84 @@ type threadClient interface {
 }
 
 type SessionService struct {
-	thread                   threadClient
-	user                     userClient
-	agentName                string
-	userDisplayName          string
-	messagesHistoryLength    int
-	includeKnowledge         bool
-	knowledgeContextTemplate *string
+	thread                threadClient
+	user                  userClient
+	agentName             string
+	userDisplayName       string
+	messagesHistoryLength int
+	knowledge             *knowledgeConfig
 
-	timezoneContextKey   any            // non-nil iff from-context mode
-	timeHarnessStaticLoc *time.Location // non-nil iff static mode
+	timeHarness *timeHarnessConfig
 }
 
 type Option func(*SessionService)
+
+type knowledgeConfig struct {
+	templateID *string
+}
+
+type timeHarnessConfig struct {
+	zone *Zone
+}
+
+// Zone describes where the time harness resolves the user's timezone.
+// Use StaticZone or ZoneFromContext to create one.
+type Zone struct {
+	resolve func(context.Context) (*time.Location, error)
+}
+
+// StaticZone returns a zone backed by a fixed IANA timezone.
+// Empty string means UTC. Invalid timezone names panic because they are
+// programmer configuration errors.
+func StaticZone(timezone string) *Zone {
+	if timezone == "" {
+		return &Zone{
+			resolve: func(context.Context) (*time.Location, error) {
+				return time.UTC, nil
+			},
+		}
+	}
+	loc, err := time.LoadLocation(timezone)
+	if err != nil {
+		panic(fmt.Sprintf("zep: StaticZone: invalid timezone %q: %v", timezone, err))
+	}
+	return &Zone{
+		resolve: func(context.Context) (*time.Location, error) {
+			return loc, nil
+		},
+	}
+}
+
+type timezoneContextKey struct{}
+
+// ContextWithTimezone returns a child context carrying an IANA timezone string
+// for ZoneFromContext.
+func ContextWithTimezone(ctx context.Context, timezone string) context.Context {
+	return context.WithValue(ctx, timezoneContextKey{}, timezone)
+}
+
+// ZoneFromContext configures the time harness to resolve the timezone from the
+// request context. Use ContextWithTimezone to provide the timezone per request.
+func ZoneFromContext() *Zone {
+	return &Zone{
+		resolve: func(ctx context.Context) (*time.Location, error) {
+			tz, _ := ctx.Value(timezoneContextKey{}).(string)
+			if tz == "" {
+				return nil, fmt.Errorf("zep: ZoneFromContext active but timezone absent or empty")
+			}
+			loc, err := time.LoadLocation(tz)
+			if err != nil {
+				return nil, fmt.Errorf("zep: ZoneFromContext: invalid timezone %q: %w", tz, err)
+			}
+			return loc, nil
+		},
+	}
+}
 
 func NewSessionService(c *client.Client, agentName string, opts ...Option) *SessionService {
 	s := &SessionService{
 		agentName:             agentName,
 		messagesHistoryLength: 0,
-		includeKnowledge:      false,
 	}
 	if c != nil {
 		s.thread = c.Thread
@@ -77,49 +136,24 @@ func WithUserDisplayName(name string) Option {
 
 func WithKnowledgeContext(contextTemplateID *string) Option {
 	return func(s *SessionService) {
-		s.includeKnowledge = true
-		s.knowledgeContextTemplate = contextTemplateID
+		s.knowledge = &knowledgeConfig{templateID: contextTemplateID}
 	}
 }
 
-// WithTimeHarness enables time-awareness with a static IANA timezone.
-// Empty string means UTC. An invalid timezone PANICS at construction
-// (fail-fast — invalid timezone is always a programmer error).
+// WithTimeHarness enables time-awareness using the provided zone source.
+// A nil zone enables time-awareness without timezone conversion; timestamps are
+// formatted in their parsed timezone, and the current-time anchor uses UTC.
 //
 // When enabled:
 //   - History message prefix becomes [YYYY-MM-DD HH:MM Name] instead of [Name]
 //   - A current_time anchor event is appended after history
 //   - Any message with unparseable CreatedAt causes Get to return an error
-func WithTimeHarness(timezone string) Option {
-	return func(s *SessionService) {
-		s.timezoneContextKey = nil
-		if timezone == "" {
-			s.timeHarnessStaticLoc = time.UTC
-			return
-		}
-		loc, err := time.LoadLocation(timezone)
-		if err != nil {
-			panic(fmt.Sprintf("zep: WithTimeHarness: invalid timezone %q: %v", timezone, err))
-		}
-		s.timeHarnessStaticLoc = loc
-	}
-}
-
-// WithTimeHarnessFromContext enables time-awareness with per-request
-// timezone resolution. key is the context key under which an IANA timezone
-// string (e.g. "Asia/Jakarta") is stored on every request. If the key is
-// absent or holds an invalid IANA timezone at request time, Get returns
-// an error.
-//
-// Panics if key is nil (fail-fast — nil key is always a programmer error).
-// If WithTimeHarness is also called, last call wins.
-func WithTimeHarnessFromContext(key any) Option {
-	if key == nil {
-		panic("zep: WithTimeHarnessFromContext: key must not be nil")
+func WithTimeHarness(zone *Zone) Option {
+	if zone != nil && zone.resolve == nil {
+		panic("zep: WithTimeHarness: zone must be created by StaticZone or ZoneFromContext")
 	}
 	return func(s *SessionService) {
-		s.timezoneContextKey = key
-		s.timeHarnessStaticLoc = nil
+		s.timeHarness = &timeHarnessConfig{zone: zone}
 	}
 }
 
@@ -318,24 +352,17 @@ func (s *SessionService) AppendEvent(ctx context.Context, sess adksession.Sessio
 
 // timeHarnessEnabled reports whether time-awareness is configured.
 func (s *SessionService) timeHarnessEnabled() bool {
-	return s.timezoneContextKey != nil || s.timeHarnessStaticLoc != nil
+	return s.timeHarness != nil
 }
 
-// resolveLocation returns the timezone for header formatting. It assumes
+// resolveLocation returns the timezone for header formatting. A nil location
+// means timestamps should be formatted in their parsed timezone. It assumes
 // time-awareness is enabled.
 func (s *SessionService) resolveLocation(ctx context.Context) (*time.Location, error) {
-	if s.timezoneContextKey == nil {
-		return s.timeHarnessStaticLoc, nil
+	if s.timeHarness.zone == nil {
+		return nil, nil
 	}
-	tz, _ := ctx.Value(s.timezoneContextKey).(string)
-	if tz == "" {
-		return nil, fmt.Errorf("zep: WithTimeHarnessFromContext active but context key %v absent or empty", s.timezoneContextKey)
-	}
-	loc, err := time.LoadLocation(tz)
-	if err != nil {
-		return nil, fmt.Errorf("zep: WithTimeHarnessFromContext: invalid timezone %q: %w", tz, err)
-	}
-	return loc, nil
+	return s.timeHarness.zone.resolve(ctx)
 }
 
 func (s *SessionService) roleToADK(role zep.RoleType) string {
@@ -427,7 +454,10 @@ func (s *SessionService) fetchHistory(ctx context.Context, sessionID, expectedUs
 					"zep: TimeHarness enabled but message %s has unparseable CreatedAt: %q",
 					derefOrEmpty(msg.UUID), *msg.CreatedAt)
 			}
-			local := t.In(loc)
+			local := t
+			if loc != nil {
+				local = t.In(loc)
+			}
 			header := fmt.Sprintf("%s %s", local.Format("2006-01-02 15:04"), name)
 			content = fmt.Sprintf("[%s] %s", header, content)
 			if t.After(lastTime) {
@@ -556,7 +586,10 @@ func formatElapsed(d time.Duration) string {
 }
 
 func (s *SessionService) buildCurrentTimeAnchor(loc *time.Location, lastTime time.Time) string {
-	now := time.Now().In(loc)
+	now := time.Now().UTC()
+	if loc != nil {
+		now = now.In(loc)
+	}
 	nowStr := now.Format("2006-01-02 15:04")
 
 	if lastTime.IsZero() {
@@ -572,8 +605,8 @@ func (s *SessionService) buildCurrentTimeAnchor(loc *time.Location, lastTime tim
 func (s *SessionService) buildContext(ctx context.Context, sessionID, expectedUserID string) ([]*adksession.Event, time.Time, error) {
 	var events []*adksession.Event
 
-	if s.includeKnowledge {
-		if knowledge := s.fetchKnowledge(ctx, sessionID, s.knowledgeContextTemplate); knowledge != "" {
+	if s.knowledge != nil {
+		if knowledge := s.fetchKnowledge(ctx, sessionID, s.knowledge.templateID); knowledge != "" {
 			events = append(events, s.newSystemEvent("knowledge", knowledge))
 		}
 	}

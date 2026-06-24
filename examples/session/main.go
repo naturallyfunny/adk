@@ -6,16 +6,13 @@ import (
 	"time"
 
 	"go.naturallyfunny.dev/adk/session"
+	"go.naturallyfunny.dev/adk/zep"
 	adksession "google.golang.org/adk/session"
 )
 
-type ctxKey string
-
-const TimezoneKey ctxKey = "timezone"
-
 func main() {
 	// Assume baseSvc is an existing session implementation (like Zep).
-	// Timezone is passed directly to the base service (e.g. zep.WithTimeHarnessFromContext(TimezoneKey))
+	// Timezone is passed directly to Zep through its package-level context helper
 	// rather than bridged through the decorator.
 	var baseSvc adksession.Service = &mockService{}
 
@@ -25,7 +22,7 @@ func main() {
 	)
 
 	// Context carrying the user's timezone (typically set by HTTP middleware)
-	ctx := context.WithValue(context.Background(), TimezoneKey, "Asia/Jakarta")
+	ctx := zep.ContextWithTimezone(context.Background(), "Asia/Jakarta")
 
 	resp, _ := svc.Get(ctx, &adksession.GetRequest{
 		SessionID: "session-789",

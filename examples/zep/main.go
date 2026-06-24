@@ -25,6 +25,7 @@ func main() {
 		"my-agent",
 		zep.WithMessagesHistoryLength(10),
 		zep.WithKnowledgeContext(nil),
+		zep.WithTimeHarness(zep.StaticZone("Asia/Jakarta")),
 	)
 
 	// Initialize the ADK Runner

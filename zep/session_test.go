@@ -13,10 +13,6 @@ import (
 	adksession "google.golang.org/adk/session"
 )
 
-type testCtxKey string
-
-const tzKey testCtxKey = "timezone"
-
 // ptr returns a pointer to the given string.
 func ptr(s string) *string { return &s }
 
@@ -138,7 +134,7 @@ func TestHeader_DefaultMode(t *testing.T) {
 	}
 }
 
-func TestHeader_StaticUTC(t *testing.T) {
+func TestHeader_DefaultZoneUTC(t *testing.T) {
 	ts := "2026-05-17T12:00:00Z"
 	msgs := []*zepgo.Message{
 		{
@@ -148,7 +144,7 @@ func TestHeader_StaticUTC(t *testing.T) {
 			CreatedAt: ptr(ts),
 		},
 	}
-	svc := newTestService(msgs, WithTimeHarness(""))
+	svc := newTestService(msgs, WithTimeHarness(nil))
 	events := runBuildContext(t, svc, context.Background())
 
 	hist := historyEvents(events)
@@ -158,6 +154,29 @@ func TestHeader_StaticUTC(t *testing.T) {
 	text := eventText(t, hist[0])
 	if !strings.HasPrefix(text, "[2026-05-17 12:00 Alice] ") {
 		t.Errorf("expected UTC datetime prefix, got: %q", text)
+	}
+}
+
+func TestHeader_DefaultZoneUsesParsedTimestampZone(t *testing.T) {
+	ts := "2026-05-17T12:00:00+07:00"
+	msgs := []*zepgo.Message{
+		{
+			Role:      zepgo.RoleTypeUserRole,
+			Content:   "hello",
+			Name:      ptr("Alice"),
+			CreatedAt: ptr(ts),
+		},
+	}
+	svc := newTestService(msgs, WithTimeHarness(nil))
+	events := runBuildContext(t, svc, context.Background())
+
+	hist := historyEvents(events)
+	if len(hist) != 1 {
+		t.Fatalf("expected 1 history event, got %d", len(hist))
+	}
+	text := eventText(t, hist[0])
+	if !strings.HasPrefix(text, "[2026-05-17 12:00 Alice] ") {
+		t.Errorf("expected parsed timestamp zone to be preserved, got: %q", text)
 	}
 }
 
@@ -172,7 +191,7 @@ func TestHeader_StaticJakarta(t *testing.T) {
 			CreatedAt: ptr(ts),
 		},
 	}
-	svc := newTestService(msgs, WithTimeHarness("Asia/Jakarta"))
+	svc := newTestService(msgs, WithTimeHarness(StaticZone("Asia/Jakarta")))
 	events := runBuildContext(t, svc, context.Background())
 
 	hist := historyEvents(events)
@@ -195,8 +214,8 @@ func TestHeader_FromContext_OK(t *testing.T) {
 			CreatedAt: ptr(ts),
 		},
 	}
-	svc := newTestService(msgs, WithTimeHarnessFromContext(tzKey))
-	ctx := context.WithValue(context.Background(), tzKey, "Asia/Jakarta")
+	svc := newTestService(msgs, WithTimeHarness(ZoneFromContext()))
+	ctx := ContextWithTimezone(context.Background(), "Asia/Jakarta")
 	events := runBuildContext(t, svc, ctx)
 
 	hist := historyEvents(events)
@@ -220,7 +239,7 @@ func TestHeader_FromContext_Missing_Errors(t *testing.T) {
 			CreatedAt: ptr(ts),
 		},
 	}
-	svc := newTestService(msgs, WithTimeHarnessFromContext(tzKey))
+	svc := newTestService(msgs, WithTimeHarness(ZoneFromContext()))
 	// context has no timezone value
 	_, _, err := svc.buildContext(context.Background(), "test-session", "")
 	if err == nil {
@@ -241,8 +260,8 @@ func TestHeader_FromContext_InvalidTZ_Errors(t *testing.T) {
 			CreatedAt: ptr(ts),
 		},
 	}
-	svc := newTestService(msgs, WithTimeHarnessFromContext(tzKey))
-	ctx := context.WithValue(context.Background(), tzKey, "Not/AValidZone")
+	svc := newTestService(msgs, WithTimeHarness(ZoneFromContext()))
+	ctx := ContextWithTimezone(context.Background(), "Not/AValidZone")
 	_, _, err := svc.buildContext(ctx, "test-session", "")
 	if err == nil {
 		t.Fatal("expected error for invalid timezone, got nil")
@@ -262,7 +281,7 @@ func TestHeader_TimeHarnessOn_BadTimestamp_Errors(t *testing.T) {
 			CreatedAt: ptr(badTS),
 		},
 	}
-	svc := newTestService(msgs, WithTimeHarness(""))
+	svc := newTestService(msgs, WithTimeHarness(nil))
 	_, _, err := svc.buildContext(context.Background(), "test-session", "")
 	if err == nil {
 		t.Fatal("expected error for unparseable CreatedAt with TimeHarness on, got nil")
@@ -322,7 +341,7 @@ func TestHeader_EmptyName_FallsBackToRole(t *testing.T) {
 		}
 	})
 	t.Run("timeharness", func(t *testing.T) {
-		svc := newTestService(msgs, WithTimeHarness(""))
+		svc := newTestService(msgs, WithTimeHarness(nil))
 		events := runBuildContext(t, svc, context.Background())
 		hist := historyEvents(events)
 		if len(hist) != 1 {
@@ -372,7 +391,7 @@ func TestEvents_CurrentTime_OnlyWhenHarnessOn(t *testing.T) {
 	})
 
 	t.Run("harness_on_has_current_time", func(t *testing.T) {
-		svc := newTestService(msgs, WithTimeHarness(""))
+		svc := newTestService(msgs, WithTimeHarness(nil))
 		events := runBuildContext(t, svc, context.Background())
 		found := false
 		for _, text := range systemTexts(events) {
@@ -388,7 +407,7 @@ func TestEvents_CurrentTime_OnlyWhenHarnessOn(t *testing.T) {
 }
 
 func TestCurrentTime_WithLastTime_IncludesElapsed(t *testing.T) {
-	svc := &SessionService{timeHarnessStaticLoc: time.UTC}
+	svc := &SessionService{}
 	lastTime := time.Now().Add(-90 * time.Minute)
 	result := svc.buildCurrentTimeAnchor(time.UTC, lastTime)
 
@@ -401,7 +420,7 @@ func TestCurrentTime_WithLastTime_IncludesElapsed(t *testing.T) {
 }
 
 func TestCurrentTime_NoLastTime_NoElapsed(t *testing.T) {
-	svc := &SessionService{timeHarnessStaticLoc: time.UTC}
+	svc := &SessionService{}
 	result := svc.buildCurrentTimeAnchor(time.UTC, time.Time{})
 
 	if strings.Contains(result, "Time since previous message:") {
@@ -418,7 +437,16 @@ func TestConstruction_InvalidTimezone_Panics(t *testing.T) {
 			t.Fatal("expected panic for invalid timezone, got none")
 		}
 	}()
-	NewSessionService(nil, "agent", WithTimeHarness("Foo/Bar"))
+	NewSessionService(nil, "agent", WithTimeHarness(StaticZone("Foo/Bar")))
+}
+
+func TestConstruction_ZeroZone_Panics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic for zero Zone, got none")
+		}
+	}()
+	NewSessionService(nil, "agent", WithTimeHarness(&Zone{}))
 }
 
 func TestFormatElapsed_Buckets(t *testing.T) {
@@ -448,7 +476,7 @@ func TestFormatElapsed_Buckets(t *testing.T) {
 }
 
 func TestCurrentTime_Anchor_ContainsFraming(t *testing.T) {
-	svc := &SessionService{timeHarnessStaticLoc: time.UTC}
+	svc := &SessionService{}
 
 	t.Run("empty_thread", func(t *testing.T) {
 		result := svc.buildCurrentTimeAnchor(time.UTC, time.Time{})
@@ -658,7 +686,7 @@ func TestEvents_Order_PreambleHistoryPostambleCurrentTime(t *testing.T) {
 			CreatedAt: ptr(ts),
 		},
 	}
-	svc := newTestService(msgs, WithTimeHarness("Asia/Jakarta"))
+	svc := newTestService(msgs, WithTimeHarness(StaticZone("Asia/Jakarta")))
 	events := runBuildContext(t, svc, context.Background())
 
 	// Expected sequence: preamble, history, postamble, current_time

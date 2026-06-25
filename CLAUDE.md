@@ -33,6 +33,46 @@ the main flow.
 Do not group all private helpers at the bottom by default. That style makes the
 file look tidy superficially, but it often makes the actual reading path worse.
 
+### Dependency chain for config types
+
+When a config struct contains a field of another type, that field's type must be
+declared above it — not below. Chain them in dependency order:
+
+```go
+// Zone is used by timeHarnessConfig, so it comes first.
+type Zone struct { ... }
+
+type timeHarnessConfig struct {
+    zone *Zone
+}
+
+type SessionService struct {
+    timeHarness *timeHarnessConfig
+}
+```
+
+### Exported helpers that produce option values
+
+Functions like `StaticZone` or `ZoneFromContext` that exist to produce a value
+passed into a `With*` option are **option helpers**, not config types. Place them
+**after the constructor**, grouped immediately before the `With*` option that
+consumes them:
+
+```go
+func NewSessionService(...) *SessionService { ... }
+
+func WithKnowledgeContext(...) Option { ... }
+
+// Zone helpers come here, just before WithTimeHarness.
+func StaticZone(...) *Zone { ... }
+func ZoneFromContext() *Zone { ... }
+
+func WithTimeHarness(zone *Zone) Option { ... }
+```
+
+Do not place them before the constructor simply because they return a type that
+is declared in the config block.
+
 Keep behavior-preserving reorder commits clean: avoid mixing ordering changes
 with renames, refactors, logic changes, or formatting churn outside the touched
 file.

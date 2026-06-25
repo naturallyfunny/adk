@@ -22,7 +22,6 @@ func main() {
 	// Set up the Session Service
 	svc := zep.NewSessionService(
 		zepClient,
-		"my-agent",
 		zep.WithMessagesHistoryLength(10),
 		zep.WithKnowledgeContext(nil),
 		zep.WithTimeHarness(zep.StaticZone("Asia/Jakarta")),

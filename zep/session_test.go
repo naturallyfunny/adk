@@ -53,7 +53,6 @@ func (fakeUser) Add(context.Context, *zepgo.CreateUserRequest, ...option.Request
 // agentName defaults to "Zee"; messagesHistoryLength defaults to 10.
 func newTestService(msgs []*zepgo.Message, opts ...Option) *SessionService {
 	s := &SessionService{
-		agentName:             "Zee",
 		messagesHistoryLength: 10,
 		thread: &fakeThread{
 			getResp: &zepgo.MessageListResponse{Messages: msgs},
@@ -437,7 +436,7 @@ func TestConstruction_InvalidTimezone_Panics(t *testing.T) {
 			t.Fatal("expected panic for invalid timezone, got none")
 		}
 	}()
-	NewSessionService(nil, "agent", WithTimeHarness(StaticZone("Foo/Bar")))
+	NewSessionService(nil, WithTimeHarness(StaticZone("Foo/Bar")))
 }
 
 func TestConstruction_ZeroZone_Panics(t *testing.T) {
@@ -446,7 +445,7 @@ func TestConstruction_ZeroZone_Panics(t *testing.T) {
 			t.Fatal("expected panic for zero Zone, got none")
 		}
 	}()
-	NewSessionService(nil, "agent", WithTimeHarness(&Zone{}))
+	NewSessionService(nil, WithTimeHarness(&Zone{}))
 }
 
 func TestFormatElapsed_Buckets(t *testing.T) {
@@ -519,7 +518,6 @@ func newOwnershipService(t *testing.T, ownerID string, msgs []*zepgo.Message, ge
 		}
 	}
 	s := &SessionService{
-		agentName:             "Zee",
 		messagesHistoryLength: 10,
 		thread:                &fakeThread{getResp: resp, getErr: getErr},
 		user:                  fakeUser{},
@@ -632,7 +630,7 @@ func createRequest(userID string) *adksession.CreateRequest {
 // reject without ever creating the thread.
 func TestOwnership_Create_ForeignThread_Rejected(t *testing.T) {
 	ft := &fakeThread{getResp: &zepgo.MessageListResponse{UserID: ptr("alice")}}
-	svc := &SessionService{agentName: "Zee", messagesHistoryLength: 10, thread: ft, user: fakeUser{}}
+	svc := &SessionService{messagesHistoryLength: 10, thread: ft, user: fakeUser{}}
 
 	_, err := svc.Create(context.Background(), createRequest("bob"))
 	if !errors.Is(err, ErrSessionOwnerMismatch) {
@@ -647,7 +645,7 @@ func TestOwnership_Create_ForeignThread_Rejected(t *testing.T) {
 // path: the thread does not exist (NotFound), so Create proceeds.
 func TestOwnership_Create_NewThread_Succeeds(t *testing.T) {
 	ft := &fakeThread{getErr: &zepgo.NotFoundError{}}
-	svc := &SessionService{agentName: "Zee", messagesHistoryLength: 10, thread: ft, user: fakeUser{}}
+	svc := &SessionService{messagesHistoryLength: 10, thread: ft, user: fakeUser{}}
 
 	resp, err := svc.Create(context.Background(), createRequest("bob"))
 	if err != nil {
@@ -665,7 +663,7 @@ func TestOwnership_Create_NewThread_Succeeds(t *testing.T) {
 // thread is allowed.
 func TestOwnership_Create_OwnedBySelf_Succeeds(t *testing.T) {
 	ft := &fakeThread{getResp: &zepgo.MessageListResponse{UserID: ptr("alice")}}
-	svc := &SessionService{agentName: "Zee", messagesHistoryLength: 10, thread: ft, user: fakeUser{}}
+	svc := &SessionService{messagesHistoryLength: 10, thread: ft, user: fakeUser{}}
 
 	_, err := svc.Create(context.Background(), createRequest("alice"))
 	if err != nil {

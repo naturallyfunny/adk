@@ -49,7 +49,6 @@ type threadClient interface {
 type SessionService struct {
 	thread                threadClient
 	user                  userClient
-	agentName             string
 	userDisplayName       string
 	messagesHistoryLength int
 	sessionInstruction    string
@@ -59,9 +58,8 @@ type SessionService struct {
 
 type Option func(*SessionService)
 
-func NewSessionService(c *client.Client, agentName string, opts ...Option) *SessionService {
+func NewSessionService(c *client.Client, opts ...Option) *SessionService {
 	s := &SessionService{
-		agentName:             agentName,
 		messagesHistoryLength: 0,
 	}
 	if c != nil {
@@ -340,7 +338,8 @@ func (s *SessionService) AppendEvent(ctx context.Context, sess adksession.Sessio
 	}
 	switch zepRole {
 	case zep.RoleTypeAssistantRole:
-		msg.Name = &s.agentName
+		name := event.Author
+		msg.Name = &name
 	case zep.RoleTypeUserRole:
 		name := s.userDisplayName
 		if name == "" {
@@ -368,13 +367,6 @@ func (s *SessionService) resolveLocation(ctx context.Context) (*time.Location, e
 		return nil, nil
 	}
 	return s.timeHarness.zone.resolve(ctx)
-}
-
-func (s *SessionService) roleToADK(role zep.RoleType) string {
-	if role == zep.RoleTypeUserRole {
-		return "user"
-	}
-	return s.agentName
 }
 
 // parseTimestamp tries RFC3339Nano then RFC3339. Returns false when neither
@@ -431,18 +423,28 @@ func (s *SessionService) fetchHistory(ctx context.Context, sessionID, expectedUs
 			continue
 		}
 
-		role := s.roleToADK(msg.Role)
-		evt := adksession.NewEvent(derefOrEmpty(msg.UUID))
-		evt.Author = role
-
-		contentRole := "model"
-		if role == "user" {
-			contentRole = "user"
-		}
+		isUser := msg.Role == zep.RoleTypeUserRole
 
 		name := derefOrEmpty(msg.Name)
-		if name == "" {
-			name = role // fallback so prefix is never bare []
+		var author string
+		if isUser {
+			author = "user"
+			if name == "" {
+				name = "user"
+			}
+		} else {
+			if name == "" {
+				name = "assistant"
+			}
+			author = name
+		}
+
+		evt := adksession.NewEvent(derefOrEmpty(msg.UUID))
+		evt.Author = author
+
+		contentRole := "model"
+		if isUser {
+			contentRole = "user"
 		}
 
 		content := msg.Content

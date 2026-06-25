@@ -18,6 +18,20 @@ import (
 	"google.golang.org/genai"
 )
 
+// Zone describes where the time harness resolves the user's timezone.
+// Use StaticZone or ZoneFromContext to create one.
+type Zone struct {
+	resolve func(context.Context) (*time.Location, error)
+}
+
+type timeHarnessConfig struct {
+	zone *Zone
+}
+
+type knowledgeConfig struct {
+	templateID *string
+}
+
 // userClient is the slice of zep user functionality this service needs.
 type userClient interface {
 	Get(ctx context.Context, userID string, opts ...option.RequestOption) (*zep.User, error)
@@ -30,20 +44,6 @@ type threadClient interface {
 	AddMessages(ctx context.Context, threadID string, request *zep.AddThreadMessagesRequest, opts ...option.RequestOption) (*zep.AddThreadMessagesResponse, error)
 	Get(ctx context.Context, threadID string, request *zep.ThreadGetRequest, opts ...option.RequestOption) (*zep.MessageListResponse, error)
 	GetUserContext(ctx context.Context, threadID string, request *zep.ThreadGetUserContextRequest, opts ...option.RequestOption) (*zep.ThreadContextResponse, error)
-}
-
-type knowledgeConfig struct {
-	templateID *string
-}
-
-// Zone describes where the time harness resolves the user's timezone.
-// Use StaticZone or ZoneFromContext to create one.
-type Zone struct {
-	resolve func(context.Context) (*time.Location, error)
-}
-
-type timeHarnessConfig struct {
-	zone *Zone
 }
 
 type SessionService struct {

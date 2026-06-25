@@ -33,22 +33,42 @@ the main flow.
 Do not group all private helpers at the bottom by default. That style makes the
 file look tidy superficially, but it often makes the actual reading path worse.
 
-### Dependency chain for config types
+### Nearest dependency first
 
-When a config struct contains a field of another type, that field's type must be
-declared above it — not below. Chain them in dependency order:
+Place dependencies in **reverse order of their first appearance** inside the
+block that uses them. The dependency a reader encounters first should be
+immediately above the block (nearest); dependencies encountered later sit
+further up. This minimises scroll distance: when a reader hits an unfamiliar
+type, it is just a short scroll back.
+
+Applied to a struct: the type of the first field goes directly above the struct,
+the type of the second field goes above that, and so on.
 
 ```go
-// Zone is used by timeHarnessConfig, so it comes first.
-type Zone struct { ... }
+// SessionService fields in order: thread, user, knowledge, timeHarness.
+// So nearest → farthest matches that order in reverse:
 
-type timeHarnessConfig struct {
-    zone *Zone
-}
-
+type Zone struct { ... }            // used by timeHarnessConfig (field 4's type)
+type timeHarnessConfig struct { ... } // field 4: timeHarness *timeHarnessConfig
+type knowledgeConfig struct { ... }   // field 3: knowledge *knowledgeConfig
+type userClient interface { ... }     // field 2: user userClient
+type threadClient interface { ... }   // field 1: thread threadClient  ← nearest
 type SessionService struct {
+    thread   threadClient
+    user     userClient
+    knowledge *knowledgeConfig
     timeHarness *timeHarnessConfig
 }
+```
+
+Applied to a function: the parameter or return type encountered first in the
+signature goes immediately above; earlier-encountered local deps are above that.
+
+```go
+// NewSessionService signature mentions Option first, then *SessionService.
+type SessionService struct { ... }  // encountered second → further up
+type Option func(*SessionService)   // encountered first → nearest
+func NewSessionService(..., opts ...Option) *SessionService { ... }
 ```
 
 ### Exported helpers that produce option values

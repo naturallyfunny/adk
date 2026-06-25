@@ -11,6 +11,7 @@ import (
 	"github.com/getzep/zep-go/v3/option"
 
 	adksession "google.golang.org/adk/session"
+	"google.golang.org/genai"
 )
 
 // ptr returns a pointer to the given string.
@@ -20,6 +21,7 @@ type fakeThread struct {
 	getResp     *zepgo.MessageListResponse
 	getErr      error
 	createCalls int
+	addReq      *zepgo.AddThreadMessagesRequest
 }
 
 func (f *fakeThread) Create(context.Context, *zepgo.CreateThreadRequest, ...option.RequestOption) (*zepgo.Thread, error) {
@@ -27,7 +29,8 @@ func (f *fakeThread) Create(context.Context, *zepgo.CreateThreadRequest, ...opti
 	return nil, nil
 }
 
-func (f *fakeThread) AddMessages(context.Context, string, *zepgo.AddThreadMessagesRequest, ...option.RequestOption) (*zepgo.AddThreadMessagesResponse, error) {
+func (f *fakeThread) AddMessages(_ context.Context, _ string, req *zepgo.AddThreadMessagesRequest, _ ...option.RequestOption) (*zepgo.AddThreadMessagesResponse, error) {
+	f.addReq = req
 	return nil, nil
 }
 
@@ -54,10 +57,10 @@ func (fakeUser) Add(context.Context, *zepgo.CreateUserRequest, ...option.Request
 func newTestService(msgs []*zepgo.Message, opts ...Option) *SessionService {
 	s := &SessionService{
 		messagesHistoryLength: 10,
-		thread: &fakeThread{
+		threadClient: &fakeThread{
 			getResp: &zepgo.MessageListResponse{Messages: msgs},
 		},
-		user: fakeUser{},
+		userClient: fakeUser{},
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -442,10 +445,99 @@ func TestConstruction_InvalidTimezone_Panics(t *testing.T) {
 func TestConstruction_ZeroZone_Panics(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {
-			t.Fatal("expected panic for zero Zone, got none")
+			t.Fatal("expected panic for zero ZoneResolver, got none")
 		}
 	}()
-	NewSessionService(nil, WithTimeHarness(&Zone{}))
+	NewSessionService(nil, WithTimeHarness(&ZoneResolver{}))
+}
+
+func TestConstruction_NilSpeaker_Panics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic for nil speaker, got none")
+		}
+	}()
+	NewSessionService(nil, WithUserDisplayName(nil))
+}
+
+func TestConstruction_ZeroSpeaker_Panics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic for zero SpeakerResolver, got none")
+		}
+	}()
+	NewSessionService(nil, WithUserDisplayName(&SpeakerResolver{}))
+}
+
+// userTextEvent builds an inbound user-role event carrying text, mirroring what
+// the ADK runner produces for a human (or delegating agent) turn.
+func userTextEvent(text string) *adksession.Event {
+	evt := adksession.NewEvent("inv")
+	evt.Author = "user"
+	evt.Content = genai.NewContentFromText(text, genai.RoleUser)
+	return evt
+}
+
+// addedName returns the Name of the single message captured by AppendEvent.
+func addedName(t *testing.T, ft *fakeThread) string {
+	t.Helper()
+	if ft.addReq == nil || len(ft.addReq.Messages) != 1 {
+		t.Fatalf("expected one message added, got %+v", ft.addReq)
+	}
+	return derefOrEmpty(ft.addReq.Messages[0].Name)
+}
+
+func TestAppendEvent_UserName_DefaultsToUserID(t *testing.T) {
+	ft := &fakeThread{}
+	s := &SessionService{threadClient: ft, userClient: fakeUser{}}
+	sess := &zepSession{id: "sess", userID: "alice"}
+
+	if err := s.AppendEvent(context.Background(), sess, userTextEvent("hi")); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+	if got := addedName(t, ft); got != "alice" {
+		t.Fatalf("name = %q, want %q", got, "alice")
+	}
+}
+
+func TestAppendEvent_UserName_StaticSpeaker(t *testing.T) {
+	ft := &fakeThread{}
+	s := &SessionService{threadClient: ft, userClient: fakeUser{}}
+	WithUserDisplayName(StaticSpeaker("human"))(s)
+	sess := &zepSession{id: "sess", userID: "alice"}
+
+	if err := s.AppendEvent(context.Background(), sess, userTextEvent("hi")); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+	if got := addedName(t, ft); got != "human" {
+		t.Fatalf("name = %q, want %q", got, "human")
+	}
+}
+
+func TestAppendEvent_UserName_SpeakerFromContext(t *testing.T) {
+	ft := &fakeThread{}
+	s := &SessionService{threadClient: ft, userClient: fakeUser{}}
+	WithUserDisplayName(SpeakerFromContext())(s)
+	sess := &zepSession{id: "sess", userID: "alice"}
+
+	ctx := ContextWithSpeaker(context.Background(), "ava")
+	if err := s.AppendEvent(ctx, sess, userTextEvent("hi")); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+	if got := addedName(t, ft); got != "ava" {
+		t.Fatalf("name = %q, want %q", got, "ava")
+	}
+}
+
+func TestAppendEvent_UserName_SpeakerFromContext_Missing_Errors(t *testing.T) {
+	ft := &fakeThread{}
+	s := &SessionService{threadClient: ft, userClient: fakeUser{}}
+	WithUserDisplayName(SpeakerFromContext())(s)
+	sess := &zepSession{id: "sess", userID: "alice"}
+
+	if err := s.AppendEvent(context.Background(), sess, userTextEvent("hi")); err == nil {
+		t.Fatal("expected error for missing speaker context, got nil")
+	}
 }
 
 func TestFormatElapsed_Buckets(t *testing.T) {
@@ -519,8 +611,8 @@ func newOwnershipService(t *testing.T, ownerID string, msgs []*zepgo.Message, ge
 	}
 	s := &SessionService{
 		messagesHistoryLength: 10,
-		thread:                &fakeThread{getResp: resp, getErr: getErr},
-		user:                  fakeUser{},
+		threadClient:          &fakeThread{getResp: resp, getErr: getErr},
+		userClient:            fakeUser{},
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -630,7 +722,7 @@ func createRequest(userID string) *adksession.CreateRequest {
 // reject without ever creating the thread.
 func TestOwnership_Create_ForeignThread_Rejected(t *testing.T) {
 	ft := &fakeThread{getResp: &zepgo.MessageListResponse{UserID: ptr("alice")}}
-	svc := &SessionService{messagesHistoryLength: 10, thread: ft, user: fakeUser{}}
+	svc := &SessionService{messagesHistoryLength: 10, threadClient: ft, userClient: fakeUser{}}
 
 	_, err := svc.Create(context.Background(), createRequest("bob"))
 	if !errors.Is(err, ErrSessionOwnerMismatch) {
@@ -645,11 +737,11 @@ func TestOwnership_Create_ForeignThread_Rejected(t *testing.T) {
 // path: the thread does not exist (NotFound), so Create proceeds.
 func TestOwnership_Create_NewThread_Succeeds(t *testing.T) {
 	ft := &fakeThread{getErr: &zepgo.NotFoundError{}}
-	svc := &SessionService{messagesHistoryLength: 10, thread: ft, user: fakeUser{}}
+	svc := &SessionService{messagesHistoryLength: 10, threadClient: ft, userClient: fakeUser{}}
 
 	resp, err := svc.Create(context.Background(), createRequest("bob"))
 	if err != nil {
-		t.Fatalf("Create returned unexpected error for new thread: %v", err)
+		t.Fatalf("Create returned unexpected error for new threadClient: %v", err)
 	}
 	if ft.createCalls != 1 {
 		t.Errorf("expected thread.Create to be called once, got %d", ft.createCalls)
@@ -663,11 +755,11 @@ func TestOwnership_Create_NewThread_Succeeds(t *testing.T) {
 // thread is allowed.
 func TestOwnership_Create_OwnedBySelf_Succeeds(t *testing.T) {
 	ft := &fakeThread{getResp: &zepgo.MessageListResponse{UserID: ptr("alice")}}
-	svc := &SessionService{messagesHistoryLength: 10, thread: ft, user: fakeUser{}}
+	svc := &SessionService{messagesHistoryLength: 10, threadClient: ft, userClient: fakeUser{}}
 
 	_, err := svc.Create(context.Background(), createRequest("alice"))
 	if err != nil {
-		t.Fatalf("Create returned unexpected error for own thread: %v", err)
+		t.Fatalf("Create returned unexpected error for own threadClient: %v", err)
 	}
 	if ft.createCalls != 1 {
 		t.Errorf("expected thread.Create to be called once, got %d", ft.createCalls)

@@ -45,19 +45,23 @@ Applied to a struct: the type of the first field goes directly above the struct,
 the type of the second field goes above that, and so on.
 
 ```go
-// SessionService fields in order: thread, user, knowledge, timeHarness.
+// SessionService dependency fields in order: threadClient, userClient,
+// speakerResolver, knowledgeHarness, timeHarness (builtin scalars omitted).
 // So nearest → farthest matches that order in reverse:
 
-type Zone struct { ... }            // used by timeHarnessConfig (field 4's type)
-type timeHarnessConfig struct { ... } // field 4: timeHarness *timeHarnessConfig
-type knowledgeConfig struct { ... }   // field 3: knowledge *knowledgeConfig
-type userClient interface { ... }     // field 2: user userClient
-type threadClient interface { ... }   // field 1: thread threadClient  ← nearest
+type ZoneResolver struct { ... }           // used by timeHarnessConfig (field 7's value-source)
+type timeHarnessConfig struct { ... }      // field 7: timeHarness *timeHarnessConfig
+type knowledgeHarnessConfig struct { ... } // field 6: knowledgeHarness *knowledgeHarnessConfig
+type SpeakerResolver struct { ... }        // field 3: speakerResolver *SpeakerResolver
+type userClient interface { ... }          // field 2: userClient userClient
+type threadClient interface { ... }        // field 1: threadClient threadClient  ← nearest
 type SessionService struct {
-    thread   threadClient
-    user     userClient
-    knowledge *knowledgeConfig
-    timeHarness *timeHarnessConfig
+    threadClient     threadClient
+    userClient       userClient
+    speakerResolver  *SpeakerResolver
+    // … builtin scalars (messagesHistoryLength, sessionInstruction) …
+    knowledgeHarness *knowledgeHarnessConfig
+    timeHarness      *timeHarnessConfig
 }
 ```
 
@@ -84,10 +88,10 @@ func NewSessionService(...) *SessionService { ... }
 func WithKnowledgeContext(...) Option { ... }
 
 // Zone helpers come here, just before WithTimeHarness.
-func StaticZone(...) *Zone { ... }
-func ZoneFromContext() *Zone { ... }
+func StaticZone(...) *ZoneResolver { ... }
+func ZoneFromContext() *ZoneResolver { ... }
 
-func WithTimeHarness(zone *Zone) Option { ... }
+func WithTimeHarness(zone *ZoneResolver) Option { ... }
 ```
 
 Do not place them before the constructor simply because they return a type that
@@ -96,3 +100,45 @@ is declared in the config block.
 Keep behavior-preserving reorder commits clean: avoid mixing ordering changes
 with renames, refactors, logic changes, or formatting churn outside the touched
 file.
+
+## Naming
+
+Name a field by the role it plays in its struct, precisely enough that it cannot
+be mistaken for a different concept. When classifying a new struct field, decide
+which of the three categories below it belongs to first.
+
+### Dependencies that are API clients → `Client`
+
+Suffix the field and its interface with `Client` (`threadClient`, `userClient`).
+A bare `thread`/`user` reads like an identity (a thread id, a user) rather than
+the client used to reach one. The field name may equal the interface type name;
+that is fine in Go.
+
+### Single-behavior value sources → `Resolver`
+
+A type whose whole job is to produce one value — possibly from `context`,
+possibly fallibly — is a behavior, so name it with the agent-noun suffix
+`Resolver` (`ZoneResolver`, `SpeakerResolver`), as the standard library does
+(`net.Resolver`). It is *not* the value it yields: a `SpeakerResolver` is not a
+speaker, it resolves one.
+
+- Construct it through fluent factories named for the value, not the mechanism:
+  `StaticZone`, `ZoneFromContext`, `StaticSpeaker`, `SpeakerFromContext`. These
+  keep the option DSL readable, e.g. `WithUserDisplayName(SpeakerFromContext())`.
+- Keep the resolver opaque: an unexported
+  `resolve func(context.Context) (T, error)` field forces construction through
+  the factories (and lets a `With*` option panic on a zero `&XResolver{}`).
+- Name the holding field with the same `Resolver` suffix (`speakerResolver`,
+  `zoneResolver`) so a `nil` reads as "no custom resolver → default", not "no
+  speaker/zone". `field *XResolver` is normal Go (cf. `logger *log.Logger`), not
+  stutter to avoid.
+
+### Optional read-path features → `Harness`
+
+A feature that injects system events into the prompt context on the read path
+(`buildContext`/`Get`) is a `…Harness` (`timeHarness`, `knowledgeHarness`). Back
+it with a `…HarnessConfig` pointer when it needs two distinct nil levels: `nil` =
+disabled, vs non-nil with a nil inner value = enabled with a default (e.g.
+`WithTimeHarness(nil)`, `WithKnowledgeContext(nil)` are both real states). A plain
+value source that needs no such second level (a `*Resolver`) is not a harness and
+takes no wrapper — symmetry there would only add an empty layer.

@@ -18,18 +18,24 @@ import (
 	"google.golang.org/genai"
 )
 
-// Zone describes where the time harness resolves the user's timezone.
+// ZoneResolver resolves the user's timezone for the time harness.
 // Use StaticZone or ZoneFromContext to create one.
-type Zone struct {
+type ZoneResolver struct {
 	resolve func(context.Context) (*time.Location, error)
 }
 
 type timeHarnessConfig struct {
-	zone *Zone
+	zoneResolver *ZoneResolver
 }
 
-type knowledgeConfig struct {
+type knowledgeHarnessConfig struct {
 	templateID *string
+}
+
+// SpeakerResolver resolves the display name attributed to inbound user-role turns.
+// Use StaticSpeaker or SpeakerFromContext to create one.
+type SpeakerResolver struct {
+	resolve func(context.Context) (string, error)
 }
 
 // userClient is the slice of zep user functionality this service needs.
@@ -47,12 +53,12 @@ type threadClient interface {
 }
 
 type SessionService struct {
-	thread                threadClient
-	user                  userClient
-	userDisplayName       string
+	threadClient          threadClient
+	userClient            userClient
+	speakerResolver       *SpeakerResolver
 	messagesHistoryLength int
 	sessionInstruction    string
-	knowledge             *knowledgeConfig
+	knowledgeHarness      *knowledgeHarnessConfig
 	timeHarness           *timeHarnessConfig
 }
 
@@ -63,8 +69,8 @@ func NewSessionService(c *client.Client, opts ...Option) *SessionService {
 		messagesHistoryLength: 0,
 	}
 	if c != nil {
-		s.thread = c.Thread
-		s.user = c.User
+		s.threadClient = c.Thread
+		s.userClient = c.User
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -78,9 +84,49 @@ func WithMessagesHistoryLength(n int) Option {
 	}
 }
 
-func WithUserDisplayName(name string) Option {
+// StaticSpeaker returns a speaker backed by a fixed display name. An empty name
+// means inbound user turns fall back to the session's UserID.
+func StaticSpeaker(name string) *SpeakerResolver {
+	return &SpeakerResolver{
+		resolve: func(context.Context) (string, error) {
+			return name, nil
+		},
+	}
+}
+
+type speakerContextKey struct{}
+
+// ContextWithSpeaker returns a child context carrying the display name for
+// SpeakerFromContext.
+func ContextWithSpeaker(ctx context.Context, name string) context.Context {
+	return context.WithValue(ctx, speakerContextKey{}, name)
+}
+
+// SpeakerFromContext resolves the inbound user-turn display name from the request
+// context. Use ContextWithSpeaker to provide the name per request. AppendEvent
+// returns an error when the name is absent or empty, so a forgotten context does
+// not silently mislabel the turn.
+func SpeakerFromContext() *SpeakerResolver {
+	return &SpeakerResolver{
+		resolve: func(ctx context.Context) (string, error) {
+			name, _ := ctx.Value(speakerContextKey{}).(string)
+			if name == "" {
+				return "", fmt.Errorf("zep: SpeakerFromContext active but speaker absent or empty")
+			}
+			return name, nil
+		},
+	}
+}
+
+// WithUserDisplayName sets how inbound user-role turns are attributed in the Zep
+// thread, using the provided speaker source. Without this option, user turns are
+// attributed to the session's UserID.
+func WithUserDisplayName(speaker *SpeakerResolver) Option {
+	if speaker == nil || speaker.resolve == nil {
+		panic("zep: WithUserDisplayName: speaker must be created by StaticSpeaker or SpeakerFromContext")
+	}
 	return func(s *SessionService) {
-		s.userDisplayName = name
+		s.speakerResolver = speaker
 	}
 }
 
@@ -92,16 +138,16 @@ func WithSessionInstruction(instruction string) Option {
 
 func WithKnowledgeContext(contextTemplateID *string) Option {
 	return func(s *SessionService) {
-		s.knowledge = &knowledgeConfig{templateID: contextTemplateID}
+		s.knowledgeHarness = &knowledgeHarnessConfig{templateID: contextTemplateID}
 	}
 }
 
 // StaticZone returns a zone backed by a fixed IANA timezone.
 // Empty string means UTC. Invalid timezone names panic because they are
 // programmer configuration errors.
-func StaticZone(timezone string) *Zone {
+func StaticZone(timezone string) *ZoneResolver {
 	if timezone == "" {
-		return &Zone{
+		return &ZoneResolver{
 			resolve: func(context.Context) (*time.Location, error) {
 				return time.UTC, nil
 			},
@@ -111,7 +157,7 @@ func StaticZone(timezone string) *Zone {
 	if err != nil {
 		panic(fmt.Sprintf("zep: StaticZone: invalid timezone %q: %v", timezone, err))
 	}
-	return &Zone{
+	return &ZoneResolver{
 		resolve: func(context.Context) (*time.Location, error) {
 			return loc, nil
 		},
@@ -128,8 +174,8 @@ func ContextWithTimezone(ctx context.Context, timezone string) context.Context {
 
 // ZoneFromContext configures the time harness to resolve the timezone from the
 // request context. Use ContextWithTimezone to provide the timezone per request.
-func ZoneFromContext() *Zone {
-	return &Zone{
+func ZoneFromContext() *ZoneResolver {
+	return &ZoneResolver{
 		resolve: func(ctx context.Context) (*time.Location, error) {
 			tz, _ := ctx.Value(timezoneContextKey{}).(string)
 			if tz == "" {
@@ -143,6 +189,7 @@ func ZoneFromContext() *Zone {
 		},
 	}
 }
+
 // WithTimeHarness enables time-awareness using the provided zone source.
 // A nil zone enables time-awareness without timezone conversion; timestamps are
 // formatted in their parsed timezone, and the current-time anchor uses UTC.
@@ -151,12 +198,12 @@ func ZoneFromContext() *Zone {
 //   - History message prefix becomes [YYYY-MM-DD HH:MM Name] instead of [Name]
 //   - A current_time anchor event is appended after history
 //   - Any message with unparseable CreatedAt causes Get to return an error
-func WithTimeHarness(zone *Zone) Option {
+func WithTimeHarness(zone *ZoneResolver) Option {
 	if zone != nil && zone.resolve == nil {
 		panic("zep: WithTimeHarness: zone must be created by StaticZone or ZoneFromContext")
 	}
 	return func(s *SessionService) {
-		s.timeHarness = &timeHarnessConfig{zone: zone}
+		s.timeHarness = &timeHarnessConfig{zoneResolver: zone}
 	}
 }
 
@@ -167,14 +214,14 @@ func isNotFound(err error) bool {
 }
 
 func (s *SessionService) ensureUser(ctx context.Context, userID string) error {
-	_, err := s.user.Get(ctx, userID)
+	_, err := s.userClient.Get(ctx, userID)
 	if err == nil {
 		return nil
 	}
 	if !isNotFound(err) {
 		return err
 	}
-	_, err = s.user.Add(ctx, &zep.CreateUserRequest{UserID: userID})
+	_, err = s.userClient.Add(ctx, &zep.CreateUserRequest{UserID: userID})
 	return err
 }
 
@@ -268,7 +315,7 @@ func (s *SessionService) Create(ctx context.Context, req *adksession.CreateReque
 	// (conflict, idempotent success, or owner rebind) is undefined. Decide the
 	// outcome here rather than depend on Zep: an existing thread must belong to
 	// the requester; a brand-new thread (NotFound) proceeds normally.
-	existing, err := s.thread.Get(ctx, req.SessionID, &zep.ThreadGetRequest{Lastn: zep.Int(1)})
+	existing, err := s.threadClient.Get(ctx, req.SessionID, &zep.ThreadGetRequest{Lastn: zep.Int(1)})
 	switch {
 	case err == nil:
 		if err := verifyThreadOwner(existing, req.UserID); err != nil {
@@ -280,7 +327,7 @@ func (s *SessionService) Create(ctx context.Context, req *adksession.CreateReque
 		return nil, fmt.Errorf("zep create thread (ownership precheck): %w", err)
 	}
 
-	if _, err := s.thread.Create(ctx, &zep.CreateThreadRequest{
+	if _, err := s.threadClient.Create(ctx, &zep.CreateThreadRequest{
 		ThreadID: req.SessionID,
 		UserID:   req.UserID,
 	}); err != nil {
@@ -341,14 +388,20 @@ func (s *SessionService) AppendEvent(ctx context.Context, sess adksession.Sessio
 		name := event.Author
 		msg.Name = &name
 	case zep.RoleTypeUserRole:
-		name := s.userDisplayName
-		if name == "" {
-			name = sess.UserID()
+		name := sess.UserID()
+		if s.speakerResolver != nil {
+			resolved, err := s.speakerResolver.resolve(ctx)
+			if err != nil {
+				return err
+			}
+			if resolved != "" {
+				name = resolved
+			}
 		}
 		msg.Name = &name
 	}
 
-	_, err := s.thread.AddMessages(ctx, sess.ID(), &zep.AddThreadMessagesRequest{
+	_, err := s.threadClient.AddMessages(ctx, sess.ID(), &zep.AddThreadMessagesRequest{
 		Messages: []*zep.Message{msg},
 	})
 	return err
@@ -363,10 +416,10 @@ func (s *SessionService) timeHarnessEnabled() bool {
 // means timestamps should be formatted in their parsed timezone. It assumes
 // time-awareness is enabled.
 func (s *SessionService) resolveLocation(ctx context.Context) (*time.Location, error) {
-	if s.timeHarness.zone == nil {
+	if s.timeHarness.zoneResolver == nil {
 		return nil, nil
 	}
-	return s.timeHarness.zone.resolve(ctx)
+	return s.timeHarness.zoneResolver.resolve(ctx)
 }
 
 // parseTimestamp tries RFC3339Nano then RFC3339. Returns false when neither
@@ -398,7 +451,7 @@ func (s *SessionService) fetchHistory(ctx context.Context, sessionID, expectedUs
 		}
 	}
 
-	resp, err := s.thread.Get(ctx, sessionID, &zep.ThreadGetRequest{Lastn: zep.Int(lastn)})
+	resp, err := s.threadClient.Get(ctx, sessionID, &zep.ThreadGetRequest{Lastn: zep.Int(lastn)})
 	if err != nil {
 		return nil, time.Time{}, err
 	}
@@ -484,7 +537,7 @@ func (s *SessionService) fetchHistory(ctx context.Context, sessionID, expectedUs
 }
 
 func (s *SessionService) fetchKnowledge(ctx context.Context, sessionID string, templateID *string) string {
-	resp, err := s.thread.GetUserContext(ctx, sessionID, &zep.ThreadGetUserContextRequest{
+	resp, err := s.threadClient.GetUserContext(ctx, sessionID, &zep.ThreadGetUserContextRequest{
 		TemplateID: templateID,
 	})
 	if err != nil {
@@ -616,8 +669,8 @@ func (s *SessionService) buildContext(ctx context.Context, sessionID, expectedUs
 		events = append(events, s.newSystemEvent("session_instruction", s.sessionInstruction))
 	}
 
-	if s.knowledge != nil {
-		if knowledge := s.fetchKnowledge(ctx, sessionID, s.knowledge.templateID); knowledge != "" {
+	if s.knowledgeHarness != nil {
+		if knowledge := s.fetchKnowledge(ctx, sessionID, s.knowledgeHarness.templateID); knowledge != "" {
 			events = append(events, s.newSystemEvent("knowledge", knowledge))
 		}
 	}

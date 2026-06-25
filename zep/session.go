@@ -28,10 +28,6 @@ type timeHarnessConfig struct {
 	zoneResolver *ZoneResolver
 }
 
-type knowledgeHarnessConfig struct {
-	templateID *string
-}
-
 // SpeakerResolver resolves the display name attributed to inbound user-role turns.
 // Use StaticSpeaker or SpeakerFromContext to create one.
 type SpeakerResolver struct {
@@ -49,7 +45,6 @@ type threadClient interface {
 	Create(ctx context.Context, request *zep.CreateThreadRequest, opts ...option.RequestOption) (*zep.Thread, error)
 	AddMessages(ctx context.Context, threadID string, request *zep.AddThreadMessagesRequest, opts ...option.RequestOption) (*zep.AddThreadMessagesResponse, error)
 	Get(ctx context.Context, threadID string, request *zep.ThreadGetRequest, opts ...option.RequestOption) (*zep.MessageListResponse, error)
-	GetUserContext(ctx context.Context, threadID string, request *zep.ThreadGetUserContextRequest, opts ...option.RequestOption) (*zep.ThreadContextResponse, error)
 }
 
 type SessionService struct {
@@ -58,7 +53,6 @@ type SessionService struct {
 	speakerResolver       *SpeakerResolver
 	messagesHistoryLength int
 	sessionInstruction    string
-	knowledgeHarness      *knowledgeHarnessConfig
 	timeHarness           *timeHarnessConfig
 }
 
@@ -133,12 +127,6 @@ func WithSpeakerResolver(speaker *SpeakerResolver) Option {
 func WithSessionInstruction(instruction string) Option {
 	return func(s *SessionService) {
 		s.sessionInstruction = instruction
-	}
-}
-
-func WithKnowledgeContext(contextTemplateID *string) Option {
-	return func(s *SessionService) {
-		s.knowledgeHarness = &knowledgeHarnessConfig{templateID: contextTemplateID}
 	}
 }
 
@@ -536,26 +524,6 @@ func (s *SessionService) fetchHistory(ctx context.Context, sessionID, expectedUs
 	return events, lastTime, nil
 }
 
-func (s *SessionService) fetchKnowledge(ctx context.Context, sessionID string, templateID *string) string {
-	resp, err := s.threadClient.GetUserContext(ctx, sessionID, &zep.ThreadGetUserContextRequest{
-		TemplateID: templateID,
-	})
-	if err != nil {
-		return ""
-	}
-
-	if resp == nil || resp.GetContext() == nil {
-		return ""
-	}
-
-	ctxStr := *resp.GetContext()
-	if ctxStr == "" {
-		return ""
-	}
-
-	return fmt.Sprintf("[SYSTEM_RETRIEVED_RELATED_KNOWLEDGE]\n%s\n[/SYSTEM_RETRIEVED_RELATED_KNOWLEDGE]", ctxStr)
-}
-
 func (s *SessionService) newSystemEvent(category, content string) *adksession.Event {
 	evt := adksession.NewEvent(category)
 	evt.Author = "system"
@@ -667,12 +635,6 @@ func (s *SessionService) buildContext(ctx context.Context, sessionID, expectedUs
 
 	if s.sessionInstruction != "" {
 		events = append(events, s.newSystemEvent("session_instruction", s.sessionInstruction))
-	}
-
-	if s.knowledgeHarness != nil {
-		if knowledge := s.fetchKnowledge(ctx, sessionID, s.knowledgeHarness.templateID); knowledge != "" {
-			events = append(events, s.newSystemEvent("knowledge", knowledge))
-		}
 	}
 
 	// fetchHistory is always called: it verifies the thread exists in Zep,

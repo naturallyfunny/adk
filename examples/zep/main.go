@@ -23,14 +23,21 @@ func main() {
 	svc := zep.NewSessionService(
 		zepClient,
 		zep.WithMessagesHistoryLength(10),
-		zep.WithKnowledgeContext(nil),
 		zep.WithTimeHarness(zep.StaticZone("Asia/Jakarta")),
 	)
+
+	// Set up the Memory Service. Long-term knowledge is user-scoped (independent
+	// of any session) and lives in the Zep user graph. To surface it into the
+	// prompt, register preloadmemorytool.New() on the agent's tools (see
+	// adk/examples/tools/loadmemory) — it calls MemoryService.SearchMemory with
+	// the user's query and injects the result automatically each LLM request.
+	mem := zep.NewMemoryService(zepClient)
 
 	// Initialize the ADK Runner
 	// We enable AutoCreateSession so the runner handles thread creation for us.
 	rnr, err := runner.New(runner.Config{
 		SessionService:    svc,
+		MemoryService:     mem,
 		AutoCreateSession: true,
 	})
 	if err != nil {

@@ -38,10 +38,6 @@ func (f *fakeThread) Get(context.Context, string, *zepgo.ThreadGetRequest, ...op
 	return f.getResp, f.getErr
 }
 
-func (f *fakeThread) GetUserContext(context.Context, string, *zepgo.ThreadGetUserContextRequest, ...option.RequestOption) (*zepgo.ThreadContextResponse, error) {
-	return nil, nil
-}
-
 type fakeUser struct{}
 
 func (fakeUser) Get(context.Context, string, ...option.RequestOption) (*zepgo.User, error) {

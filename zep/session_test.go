@@ -496,10 +496,10 @@ func TestAppendEvent_UserName_DefaultsToUserID(t *testing.T) {
 	}
 }
 
-func TestAppendEvent_UserName_StaticSpeaker(t *testing.T) {
+func TestAppendEvent_UserName_StaticName(t *testing.T) {
 	ft := &fakeThread{}
 	s := &SessionService{threadClient: ft, userClient: fakeUser{}}
-	WithSpeakerResolver(StaticSpeaker("human"))(s)
+	WithSpeakerResolver(StaticName("human"))(s)
 	sess := &zepSession{id: "sess", userID: "alice"}
 
 	if err := s.AppendEvent(context.Background(), sess, userTextEvent("hi")); err != nil {
@@ -510,13 +510,13 @@ func TestAppendEvent_UserName_StaticSpeaker(t *testing.T) {
 	}
 }
 
-func TestAppendEvent_UserName_SpeakerFromContext(t *testing.T) {
+func TestAppendEvent_UserName_NameFromContext(t *testing.T) {
 	ft := &fakeThread{}
 	s := &SessionService{threadClient: ft, userClient: fakeUser{}}
-	WithSpeakerResolver(SpeakerFromContext())(s)
+	WithSpeakerResolver(NameFromContext())(s)
 	sess := &zepSession{id: "sess", userID: "alice"}
 
-	ctx := ContextWithSpeaker(context.Background(), "ava")
+	ctx := ContextWithName(context.Background(), "ava")
 	if err := s.AppendEvent(ctx, sess, userTextEvent("hi")); err != nil {
 		t.Fatalf("AppendEvent: %v", err)
 	}
@@ -525,10 +525,10 @@ func TestAppendEvent_UserName_SpeakerFromContext(t *testing.T) {
 	}
 }
 
-func TestAppendEvent_UserName_SpeakerFromContext_Missing_Errors(t *testing.T) {
+func TestAppendEvent_UserName_NameFromContext_Missing_Errors(t *testing.T) {
 	ft := &fakeThread{}
 	s := &SessionService{threadClient: ft, userClient: fakeUser{}}
-	WithSpeakerResolver(SpeakerFromContext())(s)
+	WithSpeakerResolver(NameFromContext())(s)
 	sess := &zepSession{id: "sess", userID: "alice"}
 
 	if err := s.AppendEvent(context.Background(), sess, userTextEvent("hi")); err == nil {

@@ -29,7 +29,7 @@ type timeHarnessConfig struct {
 }
 
 // SpeakerResolver resolves the display name attributed to inbound user-role turns.
-// Use StaticSpeaker or SpeakerFromContext to create one.
+// Use StaticName or NameFromContext to create one.
 type SpeakerResolver struct {
 	resolve func(context.Context) (string, error)
 }
@@ -78,9 +78,9 @@ func WithMessagesHistoryLength(n int) Option {
 	}
 }
 
-// StaticSpeaker returns a speaker backed by a fixed display name. An empty name
-// means inbound user turns fall back to the session's UserID.
-func StaticSpeaker(name string) *SpeakerResolver {
+// StaticName returns a speaker resolver backed by a fixed display name. An empty
+// name means inbound user turns fall back to the session's UserID.
+func StaticName(name string) *SpeakerResolver {
 	return &SpeakerResolver{
 		resolve: func(context.Context) (string, error) {
 			return name, nil
@@ -88,24 +88,24 @@ func StaticSpeaker(name string) *SpeakerResolver {
 	}
 }
 
-type speakerContextKey struct{}
+type nameContextKey struct{}
 
-// ContextWithSpeaker returns a child context carrying the display name for
-// SpeakerFromContext.
-func ContextWithSpeaker(ctx context.Context, name string) context.Context {
-	return context.WithValue(ctx, speakerContextKey{}, name)
+// ContextWithName returns a child context carrying the display name for
+// NameFromContext.
+func ContextWithName(ctx context.Context, name string) context.Context {
+	return context.WithValue(ctx, nameContextKey{}, name)
 }
 
-// SpeakerFromContext resolves the inbound user-turn display name from the request
-// context. Use ContextWithSpeaker to provide the name per request. AppendEvent
-// returns an error when the name is absent or empty, so a forgotten context does
-// not silently mislabel the turn.
-func SpeakerFromContext() *SpeakerResolver {
+// NameFromContext returns a speaker resolver that reads the inbound user-turn
+// display name from the request context. Use ContextWithName to provide the name
+// per request. AppendEvent returns an error when the name is absent or empty, so
+// a forgotten context does not silently mislabel the turn.
+func NameFromContext() *SpeakerResolver {
 	return &SpeakerResolver{
 		resolve: func(ctx context.Context) (string, error) {
-			name, _ := ctx.Value(speakerContextKey{}).(string)
+			name, _ := ctx.Value(nameContextKey{}).(string)
 			if name == "" {
-				return "", fmt.Errorf("zep: SpeakerFromContext active but speaker absent or empty")
+				return "", fmt.Errorf("zep: NameFromContext active but name absent or empty")
 			}
 			return name, nil
 		},
@@ -117,7 +117,7 @@ func SpeakerFromContext() *SpeakerResolver {
 // attributed to the session's UserID.
 func WithSpeakerResolver(speaker *SpeakerResolver) Option {
 	if speaker == nil || speaker.resolve == nil {
-		panic("zep: WithSpeakerResolver: speaker must be created by StaticSpeaker or SpeakerFromContext")
+		panic("zep: WithSpeakerResolver: speaker must be created by StaticName or NameFromContext")
 	}
 	return func(s *SessionService) {
 		s.speakerResolver = speaker

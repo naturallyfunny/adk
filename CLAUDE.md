@@ -122,9 +122,15 @@ possibly fallibly — is a behavior, so name it with the agent-noun suffix
 (`net.Resolver`). It is *not* the value it yields: a `SpeakerResolver` is not a
 speaker, it resolves one.
 
-- Construct it through fluent factories named for the value, not the mechanism:
-  `StaticZone`, `ZoneFromContext`, `StaticSpeaker`, `SpeakerFromContext`. These
-  keep the option DSL readable, e.g. `WithUserDisplayName(SpeakerFromContext())`.
+- Construct it through fluent factories named for the **value it yields**, not
+  the resolver type or the mechanism: a `ZoneResolver` yields a zone, so
+  `StaticZone`/`ZoneFromContext`; a `SpeakerResolver` yields a name, so
+  `StaticName`/`NameFromContext`. Name the factory after the value, never repeat
+  the resolver/option word, or the option DSL stutters. Compare
+  `WithSpeakerResolver(NameFromContext())` (clean) with
+  `WithSpeakerResolver(SpeakerFromContext())` (Speaker…Speaker). This mirrors how
+  `WithTimeHarness(StaticZone(...))` reads — option word (`Time`) ≠ value word
+  (`Zone`).
 - Keep the resolver opaque: an unexported
   `resolve func(context.Context) (T, error)` field forces construction through
   the factories (and lets a `With*` option panic on a zero `&XResolver{}`).

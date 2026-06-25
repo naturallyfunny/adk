@@ -38,9 +38,9 @@ type SessionService struct {
 	agentName             string
 	userDisplayName       string
 	messagesHistoryLength int
+	sessionInstruction    string
 	knowledge             *knowledgeConfig
-
-	timeHarness *timeHarnessConfig
+	timeHarness           *timeHarnessConfig
 }
 
 type Option func(*SessionService)
@@ -131,6 +131,12 @@ func WithMessagesHistoryLength(n int) Option {
 func WithUserDisplayName(name string) Option {
 	return func(s *SessionService) {
 		s.userDisplayName = name
+	}
+}
+
+func WithSessionInstruction(instruction string) Option {
+	return func(s *SessionService) {
+		s.sessionInstruction = instruction
 	}
 }
 
@@ -604,6 +610,10 @@ func (s *SessionService) buildCurrentTimeAnchor(loc *time.Location, lastTime tim
 
 func (s *SessionService) buildContext(ctx context.Context, sessionID, expectedUserID string) ([]*adksession.Event, time.Time, error) {
 	var events []*adksession.Event
+
+	if s.sessionInstruction != "" {
+		events = append(events, s.newSystemEvent("session_instruction", s.sessionInstruction))
+	}
 
 	if s.knowledge != nil {
 		if knowledge := s.fetchKnowledge(ctx, sessionID, s.knowledge.templateID); knowledge != "" {

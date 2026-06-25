@@ -676,6 +676,62 @@ func TestOwnership_Create_OwnedBySelf_Succeeds(t *testing.T) {
 	}
 }
 
+func TestSessionInstruction_EmittedWhenSet(t *testing.T) {
+	svc := newTestService(nil, WithSessionInstruction("You are a customer support agent."))
+	events := runBuildContext(t, svc, context.Background())
+
+	texts := systemTexts(events)
+	found := false
+	for _, text := range texts {
+		if text == "You are a customer support agent." {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected session instruction in system events, got: %v", texts)
+	}
+}
+
+func TestSessionInstruction_NotEmittedWhenEmpty(t *testing.T) {
+	svc := newTestService(nil) // no WithSessionInstruction
+	events := runBuildContext(t, svc, context.Background())
+
+	for _, text := range systemTexts(events) {
+		if text == "" {
+			t.Error("unexpected empty system event")
+		}
+	}
+	// More importantly: no session_instruction event should be emitted at all.
+	// With no messages and no options, there should be zero events.
+	if len(events) != 0 {
+		t.Errorf("expected no events for empty session with no options, got %d", len(events))
+	}
+}
+
+func TestSessionInstruction_IsFirstEvent(t *testing.T) {
+	ts := "2026-05-17T05:57:00Z"
+	msgs := []*zepgo.Message{
+		{
+			Role:      zepgo.RoleTypeUserRole,
+			Content:   "hello",
+			Name:      ptr("Ian"),
+			CreatedAt: ptr(ts),
+		},
+	}
+	svc := newTestService(msgs, WithSessionInstruction("session context here"), WithTimeHarness(StaticZone("Asia/Jakarta")))
+	events := runBuildContext(t, svc, context.Background())
+
+	// Expected: session_instruction, preamble, history, postamble, current_time
+	if len(events) != 5 {
+		t.Fatalf("expected 5 events, got %d", len(events))
+	}
+	if events[0].Author != "system" || eventText(t, events[0]) != "session context here" {
+		t.Errorf("position 0 should be session_instruction, got author=%q text=%q",
+			events[0].Author, eventText(t, events[0]))
+	}
+}
+
 func TestEvents_Order_PreambleHistoryPostambleCurrentTime(t *testing.T) {
 	ts := "2026-05-17T05:57:00Z"
 	msgs := []*zepgo.Message{

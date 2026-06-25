@@ -32,6 +32,20 @@ type threadClient interface {
 	GetUserContext(ctx context.Context, threadID string, request *zep.ThreadGetUserContextRequest, opts ...option.RequestOption) (*zep.ThreadContextResponse, error)
 }
 
+type knowledgeConfig struct {
+	templateID *string
+}
+
+// Zone describes where the time harness resolves the user's timezone.
+// Use StaticZone or ZoneFromContext to create one.
+type Zone struct {
+	resolve func(context.Context) (*time.Location, error)
+}
+
+type timeHarnessConfig struct {
+	zone *Zone
+}
+
 type SessionService struct {
 	thread                threadClient
 	user                  userClient
@@ -45,18 +59,43 @@ type SessionService struct {
 
 type Option func(*SessionService)
 
-type knowledgeConfig struct {
-	templateID *string
+func NewSessionService(c *client.Client, agentName string, opts ...Option) *SessionService {
+	s := &SessionService{
+		agentName:             agentName,
+		messagesHistoryLength: 0,
+	}
+	if c != nil {
+		s.thread = c.Thread
+		s.user = c.User
+	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
-type timeHarnessConfig struct {
-	zone *Zone
+func WithMessagesHistoryLength(n int) Option {
+	return func(s *SessionService) {
+		s.messagesHistoryLength = n
+	}
 }
 
-// Zone describes where the time harness resolves the user's timezone.
-// Use StaticZone or ZoneFromContext to create one.
-type Zone struct {
-	resolve func(context.Context) (*time.Location, error)
+func WithUserDisplayName(name string) Option {
+	return func(s *SessionService) {
+		s.userDisplayName = name
+	}
+}
+
+func WithSessionInstruction(instruction string) Option {
+	return func(s *SessionService) {
+		s.sessionInstruction = instruction
+	}
+}
+
+func WithKnowledgeContext(contextTemplateID *string) Option {
+	return func(s *SessionService) {
+		s.knowledge = &knowledgeConfig{templateID: contextTemplateID}
+	}
 }
 
 // StaticZone returns a zone backed by a fixed IANA timezone.
@@ -106,46 +145,6 @@ func ZoneFromContext() *Zone {
 		},
 	}
 }
-
-func NewSessionService(c *client.Client, agentName string, opts ...Option) *SessionService {
-	s := &SessionService{
-		agentName:             agentName,
-		messagesHistoryLength: 0,
-	}
-	if c != nil {
-		s.thread = c.Thread
-		s.user = c.User
-	}
-	for _, opt := range opts {
-		opt(s)
-	}
-	return s
-}
-
-func WithMessagesHistoryLength(n int) Option {
-	return func(s *SessionService) {
-		s.messagesHistoryLength = n
-	}
-}
-
-func WithUserDisplayName(name string) Option {
-	return func(s *SessionService) {
-		s.userDisplayName = name
-	}
-}
-
-func WithSessionInstruction(instruction string) Option {
-	return func(s *SessionService) {
-		s.sessionInstruction = instruction
-	}
-}
-
-func WithKnowledgeContext(contextTemplateID *string) Option {
-	return func(s *SessionService) {
-		s.knowledge = &knowledgeConfig{templateID: contextTemplateID}
-	}
-}
-
 // WithTimeHarness enables time-awareness using the provided zone source.
 // A nil zone enables time-awareness without timezone conversion; timestamps are
 // formatted in their parsed timezone, and the current-time anchor uses UTC.

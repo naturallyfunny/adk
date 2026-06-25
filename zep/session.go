@@ -118,12 +118,12 @@ func SpeakerFromContext() *SpeakerResolver {
 	}
 }
 
-// WithUserDisplayName sets how inbound user-role turns are attributed in the Zep
+// WithSpeakerResolver sets how inbound user-role turns are attributed in the Zep
 // thread, using the provided speaker source. Without this option, user turns are
 // attributed to the session's UserID.
-func WithUserDisplayName(speaker *SpeakerResolver) Option {
+func WithSpeakerResolver(speaker *SpeakerResolver) Option {
 	if speaker == nil || speaker.resolve == nil {
-		panic("zep: WithUserDisplayName: speaker must be created by StaticSpeaker or SpeakerFromContext")
+		panic("zep: WithSpeakerResolver: speaker must be created by StaticSpeaker or SpeakerFromContext")
 	}
 	return func(s *SessionService) {
 		s.speakerResolver = speaker

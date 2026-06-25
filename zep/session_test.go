@@ -457,7 +457,7 @@ func TestConstruction_NilSpeaker_Panics(t *testing.T) {
 			t.Fatal("expected panic for nil speaker, got none")
 		}
 	}()
-	NewSessionService(nil, WithUserDisplayName(nil))
+	NewSessionService(nil, WithSpeakerResolver(nil))
 }
 
 func TestConstruction_ZeroSpeaker_Panics(t *testing.T) {
@@ -466,7 +466,7 @@ func TestConstruction_ZeroSpeaker_Panics(t *testing.T) {
 			t.Fatal("expected panic for zero SpeakerResolver, got none")
 		}
 	}()
-	NewSessionService(nil, WithUserDisplayName(&SpeakerResolver{}))
+	NewSessionService(nil, WithSpeakerResolver(&SpeakerResolver{}))
 }
 
 // userTextEvent builds an inbound user-role event carrying text, mirroring what
@@ -503,7 +503,7 @@ func TestAppendEvent_UserName_DefaultsToUserID(t *testing.T) {
 func TestAppendEvent_UserName_StaticSpeaker(t *testing.T) {
 	ft := &fakeThread{}
 	s := &SessionService{threadClient: ft, userClient: fakeUser{}}
-	WithUserDisplayName(StaticSpeaker("human"))(s)
+	WithSpeakerResolver(StaticSpeaker("human"))(s)
 	sess := &zepSession{id: "sess", userID: "alice"}
 
 	if err := s.AppendEvent(context.Background(), sess, userTextEvent("hi")); err != nil {
@@ -517,7 +517,7 @@ func TestAppendEvent_UserName_StaticSpeaker(t *testing.T) {
 func TestAppendEvent_UserName_SpeakerFromContext(t *testing.T) {
 	ft := &fakeThread{}
 	s := &SessionService{threadClient: ft, userClient: fakeUser{}}
-	WithUserDisplayName(SpeakerFromContext())(s)
+	WithSpeakerResolver(SpeakerFromContext())(s)
 	sess := &zepSession{id: "sess", userID: "alice"}
 
 	ctx := ContextWithSpeaker(context.Background(), "ava")
@@ -532,7 +532,7 @@ func TestAppendEvent_UserName_SpeakerFromContext(t *testing.T) {
 func TestAppendEvent_UserName_SpeakerFromContext_Missing_Errors(t *testing.T) {
 	ft := &fakeThread{}
 	s := &SessionService{threadClient: ft, userClient: fakeUser{}}
-	WithUserDisplayName(SpeakerFromContext())(s)
+	WithSpeakerResolver(SpeakerFromContext())(s)
 	sess := &zepSession{id: "sess", userID: "alice"}
 
 	if err := s.AppendEvent(context.Background(), sess, userTextEvent("hi")); err == nil {

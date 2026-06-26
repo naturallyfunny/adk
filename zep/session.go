@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"sync"
 	"time"
 
 	"github.com/getzep/zep-go/v3"
@@ -25,7 +26,8 @@ type ZoneResolver struct {
 }
 
 type timeHarnessConfig struct {
-	zoneResolver *ZoneResolver
+	zoneResolver            *ZoneResolver
+	awarenessInstructionKey string
 }
 
 // SpeakerResolver resolves the display name attributed to inbound user-role turns.
@@ -48,20 +50,18 @@ type threadClient interface {
 }
 
 type SessionService struct {
-	threadClient          threadClient
-	userClient            userClient
-	speakerResolver       *SpeakerResolver
-	messagesHistoryLength int
-	sessionInstruction    string
-	timeHarness           *timeHarnessConfig
+	threadClient     threadClient
+	userClient       userClient
+	speakerResolver  *SpeakerResolver
+	msgHistoryLength int
+	instructionKey   string
+	timeHarness      *timeHarnessConfig
 }
 
 type Option func(*SessionService)
 
 func NewSessionService(c *client.Client, opts ...Option) *SessionService {
-	s := &SessionService{
-		messagesHistoryLength: 0,
-	}
+	s := &SessionService{}
 	if c != nil {
 		s.threadClient = c.Thread
 		s.userClient = c.User
@@ -72,9 +72,9 @@ func NewSessionService(c *client.Client, opts ...Option) *SessionService {
 	return s
 }
 
-func WithMessagesHistoryLength(n int) Option {
+func WithMessageHistoryLength(n int) Option {
 	return func(s *SessionService) {
-		s.messagesHistoryLength = n
+		s.msgHistoryLength = n
 	}
 }
 
@@ -124,9 +124,13 @@ func WithSpeakerResolver(speaker *SpeakerResolver) Option {
 	}
 }
 
-func WithSessionInstruction(instruction string) Option {
+// WithMessageHistoryInstruction registers the state key under which the message
+// format instruction is written during Get. The consumer includes {key?} (or
+// {key}) in their agent instruction for the placeholder to be resolved by the
+// ADK runner. When not set, no instruction is written to state.
+func WithMessageHistoryInstruction(key string) Option {
 	return func(s *SessionService) {
-		s.sessionInstruction = instruction
+		s.instructionKey = key
 	}
 }
 
@@ -178,20 +182,36 @@ func ZoneFromContext() *ZoneResolver {
 	}
 }
 
+// TimeHarnessOpt configures optional behaviour within WithTimeHarness.
+type TimeHarnessOpt func(*timeHarnessConfig)
+
 // WithTimeHarness enables time-awareness using the provided zone source.
 // A nil zone enables time-awareness without timezone conversion; timestamps are
 // formatted in their parsed timezone, and the current-time anchor uses UTC.
 //
 // When enabled:
 //   - History message prefix becomes [YYYY-MM-DD HH:MM Name] instead of [Name]
-//   - A current_time anchor event is appended after history
 //   - Any message with unparseable CreatedAt causes Get to return an error
-func WithTimeHarness(zone *ZoneResolver) Option {
+func WithTimeHarness(zone *ZoneResolver, opts ...TimeHarnessOpt) Option {
 	if zone != nil && zone.resolve == nil {
 		panic("zep: WithTimeHarness: zone must be created by StaticZone or ZoneFromContext")
 	}
 	return func(s *SessionService) {
-		s.timeHarness = &timeHarnessConfig{zoneResolver: zone}
+		cfg := &timeHarnessConfig{zoneResolver: zone}
+		for _, opt := range opts {
+			opt(cfg)
+		}
+		s.timeHarness = cfg
+	}
+}
+
+// WithAwarenessInstruction registers the state key under which the
+// current-time instruction block is written during Get. The consumer includes
+// {key?} (or {key}) in their agent instruction for the placeholder to be
+// resolved by the ADK runner. When not set, no instruction is written to state.
+func WithAwarenessInstruction(key string) TimeHarnessOpt {
+	return func(c *timeHarnessConfig) {
+		c.awarenessInstructionKey = key
 	}
 }
 
@@ -244,15 +264,47 @@ func verifyThreadOwner(resp *zep.MessageListResponse, expectedUserID string) err
 	return nil
 }
 
-type zepState struct{}
+type state struct {
+	mu sync.RWMutex
+	m  map[string]any
+}
 
-func (zepState) Get(_ string) (any, error)   { return nil, adksession.ErrStateKeyNotExist }
-func (zepState) Set(_ string, _ any) error   { return nil }
-func (zepState) All() iter.Seq2[string, any] { return func(func(string, any) bool) {} }
+func (s *state) Get(key string) (any, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	v, ok := s.m[key]
+	if !ok {
+		return nil, adksession.ErrStateKeyNotExist
+	}
+	return v, nil
+}
 
-type zepEvents []*adksession.Event
+func (s *state) Set(key string, val any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.m[key] = val
+	return nil
+}
 
-func (e zepEvents) All() iter.Seq[*adksession.Event] {
+func (s *state) All() iter.Seq2[string, any] {
+	s.mu.RLock()
+	cp := make(map[string]any, len(s.m))
+	for k, v := range s.m {
+		cp[k] = v
+	}
+	s.mu.RUnlock()
+	return func(yield func(string, any) bool) {
+		for k, v := range cp {
+			if !yield(k, v) {
+				return
+			}
+		}
+	}
+}
+
+type events []*adksession.Event
+
+func (e events) All() iter.Seq[*adksession.Event] {
 	return func(yield func(*adksession.Event) bool) {
 		for _, evt := range e {
 			if !yield(evt) {
@@ -262,34 +314,35 @@ func (e zepEvents) All() iter.Seq[*adksession.Event] {
 	}
 }
 
-func (e zepEvents) Len() int { return len(e) }
+func (e events) Len() int { return len(e) }
 
-func (e zepEvents) At(i int) *adksession.Event {
+func (e events) At(i int) *adksession.Event {
 	if i < 0 || i >= len(e) {
 		return nil
 	}
 	return e[i]
 }
 
-type zepSession struct {
+type session struct {
 	id         string
 	userID     string
 	app        string
 	events     []*adksession.Event
+	state      *state
 	lastUpdate time.Time // zero if no timestamped messages were fetched
 }
 
-func (z *zepSession) ID() string      { return z.id }
-func (z *zepSession) AppName() string { return z.app }
-func (z *zepSession) UserID() string  { return z.userID }
+func (z *session) ID() string      { return z.id }
+func (z *session) AppName() string { return z.app }
+func (z *session) UserID() string  { return z.userID }
 
 // LastUpdateTime returns the timestamp of the most recent message fetched from
 // Zep. Returns zero time.Time{} when no messages carry a parseable CreatedAt
 // (e.g. a brand-new or empty thread).
-func (z *zepSession) LastUpdateTime() time.Time { return z.lastUpdate }
+func (z *session) LastUpdateTime() time.Time { return z.lastUpdate }
 
-func (z *zepSession) State() adksession.State   { return zepState{} }
-func (z *zepSession) Events() adksession.Events { return zepEvents(z.events) }
+func (z *session) State() adksession.State   { return z.state }
+func (z *session) Events() adksession.Events { return events(z.events) }
 
 func (s *SessionService) Create(ctx context.Context, req *adksession.CreateRequest) (*adksession.CreateResponse, error) {
 	if err := s.ensureUser(ctx, req.UserID); err != nil {
@@ -322,10 +375,11 @@ func (s *SessionService) Create(ctx context.Context, req *adksession.CreateReque
 		return nil, fmt.Errorf("zep create thread: %w", err)
 	}
 	return &adksession.CreateResponse{
-		Session: &zepSession{
+		Session: &session{
 			id:     req.SessionID,
 			userID: req.UserID,
 			app:    req.AppName,
+			state:  &state{m: make(map[string]any)},
 		},
 	}, nil
 }
@@ -349,7 +403,7 @@ func (s *SessionService) AppendEvent(ctx context.Context, sess adksession.Sessio
 	// Always update in-memory state: the ADK flow loop reads sess.Events() on
 	// every iteration, so function-call and function-response events must be
 	// visible even though they carry no text and are not persisted to Zep.
-	if impl, ok := sess.(*zepSession); ok {
+	if impl, ok := sess.(*session); ok {
 		impl.events = append(impl.events, event)
 	}
 
@@ -425,7 +479,7 @@ func parseTimestamp(s string) (time.Time, bool) {
 }
 
 func (s *SessionService) fetchHistory(ctx context.Context, sessionID, expectedUserID string) ([]*adksession.Event, time.Time, error) {
-	lastn := s.messagesHistoryLength
+	lastn := s.msgHistoryLength
 	if lastn == 0 {
 		lastn = 1 // minimum fetch to verify the thread exists in Zep
 	}
@@ -447,13 +501,13 @@ func (s *SessionService) fetchHistory(ctx context.Context, sessionID, expectedUs
 	// Ownership guard: an existing thread must belong to the requesting user.
 	// A nonexistent thread returns NotFound above (before this point), so the
 	// AutoCreateSession path — which binds the thread to req.UserID — is never
-	// blocked here. The guard runs before the messagesHistoryLength == 0 early
+	// blocked here. The guard runs before the msgHistoryLength == 0 early
 	// return so the verify-only path is protected too.
 	if err := verifyThreadOwner(resp, expectedUserID); err != nil {
 		return nil, time.Time{}, err
 	}
 
-	if s.messagesHistoryLength == 0 {
+	if s.msgHistoryLength == 0 {
 		return nil, time.Time{}, nil // thread verified; caller requested no history
 	}
 
@@ -494,13 +548,15 @@ func (s *SessionService) fetchHistory(ctx context.Context, sessionID, expectedUs
 			if msg.CreatedAt == nil {
 				return nil, time.Time{}, fmt.Errorf(
 					"zep: TimeHarness enabled but message %s has nil CreatedAt",
-					derefOrEmpty(msg.UUID))
+					derefOrEmpty(msg.UUID),
+				)
 			}
 			t, ok := parseTimestamp(*msg.CreatedAt)
 			if !ok {
 				return nil, time.Time{}, fmt.Errorf(
 					"zep: TimeHarness enabled but message %s has unparseable CreatedAt: %q",
-					derefOrEmpty(msg.UUID), *msg.CreatedAt)
+					derefOrEmpty(msg.UUID), *msg.CreatedAt,
+				)
 			}
 			local := t
 			if loc != nil {
@@ -524,21 +580,10 @@ func (s *SessionService) fetchHistory(ctx context.Context, sessionID, expectedUs
 	return events, lastTime, nil
 }
 
-func (s *SessionService) newSystemEvent(category, content string) *adksession.Event {
-	evt := adksession.NewEvent(category)
-	evt.Author = "system"
-
-	evt.LLMResponse = model.LLMResponse{
-		Content: genai.NewContentFromText(content, genai.Role("model")),
-	}
-
-	return evt
-}
-
-func (s *SessionService) buildMessagesHistoryPreamble() string {
+func (s *SessionService) buildMessageFormatInstruction() string {
 	if s.timeHarnessEnabled() {
 		return `[MESSAGES_HISTORY_FORMAT]
-The conversation history below uses this format:
+The conversation history uses this format:
 
   [YYYY-MM-DD HH:MM Name] raw message content
 
@@ -552,29 +597,15 @@ with raw message content only.
 [/MESSAGES_HISTORY_FORMAT]`
 	}
 	return `[MESSAGES_HISTORY_FORMAT]
-The conversation history below uses this format:
+The conversation history uses this format:
 
   [Name] raw message content
 
-The bracketed prefix is system-provided metadata for speaker
-identification.
+The bracketed prefix is system-provided metadata for speaker identification.
 
 IMPORTANT: Never produce responses with this bracketed prefix. Respond
 with raw message content only.
 [/MESSAGES_HISTORY_FORMAT]`
-}
-
-func (s *SessionService) buildMessagesHistoryPostamble() string {
-	if s.timeHarnessEnabled() {
-		return `[CRITICAL_FORMAT_REMINDER]
-CRITICAL: Do not respond using the [YYYY-MM-DD HH:MM Name] format. Output
-raw message content only.
-[/CRITICAL_FORMAT_REMINDER]`
-	}
-	return `[CRITICAL_FORMAT_REMINDER]
-CRITICAL: Do not respond using the [Name] format. Output raw message
-content only.
-[/CRITICAL_FORMAT_REMINDER]`
 }
 
 const timeAwarenessFraming = "You are time-aware: the time shown above is the authoritative " +
@@ -613,7 +644,7 @@ func formatElapsed(d time.Duration) string {
 	return fmt.Sprintf("%d days %d hours %d minutes", days, h, m)
 }
 
-func (s *SessionService) buildCurrentTimeAnchor(loc *time.Location, lastTime time.Time) string {
+func (s *SessionService) buildTimeAwarenessInstruction(loc *time.Location, lastTime time.Time) string {
 	now := time.Now().UTC()
 	if loc != nil {
 		now = now.In(loc)
@@ -627,49 +658,44 @@ func (s *SessionService) buildCurrentTimeAnchor(loc *time.Location, lastTime tim
 	elapsed := time.Since(lastTime)
 	return fmt.Sprintf(
 		"[CURRENT_TIME]\nCurrent date and time: %s\nTime since previous message: %s\n\n%s\n[/CURRENT_TIME]",
-		nowStr, formatElapsed(elapsed), timeAwarenessFraming)
+		nowStr, formatElapsed(elapsed), timeAwarenessFraming,
+	)
 }
 
-func (s *SessionService) buildContext(ctx context.Context, sessionID, expectedUserID string) ([]*adksession.Event, time.Time, error) {
-	var events []*adksession.Event
-
-	if s.sessionInstruction != "" {
-		events = append(events, s.newSystemEvent("session_instruction", s.sessionInstruction))
-	}
-
-	// fetchHistory is always called: it verifies the thread exists in Zep,
-	// which lets the ADK runner trigger Create (via autoCreateSession) when needed.
-	// It also enforces the ownership guard against expectedUserID.
+func (s *SessionService) buildContext(ctx context.Context, sessionID, expectedUserID string, state *state) ([]*adksession.Event, time.Time, error) {
 	history, lastTime, err := s.fetchHistory(ctx, sessionID, expectedUserID)
 	if err != nil {
 		return nil, time.Time{}, err
 	}
 
-	if len(history) > 0 {
-		events = append(events, s.newSystemEvent("messages_history_preamble", s.buildMessagesHistoryPreamble()))
-		events = append(events, history...)
-		events = append(events, s.newSystemEvent("messages_history_postamble", s.buildMessagesHistoryPostamble()))
+	if len(history) > 0 && s.instructionKey != "" {
+		if err := state.Set(s.instructionKey, s.buildMessageFormatInstruction()); err != nil {
+			return nil, time.Time{}, err
+		}
 	}
 
-	if s.timeHarnessEnabled() {
+	if s.timeHarnessEnabled() && s.timeHarness.awarenessInstructionKey != "" {
 		loc, err := s.resolveLocation(ctx)
 		if err != nil {
 			return nil, time.Time{}, err
 		}
-		events = append(events, s.newSystemEvent("current_time", s.buildCurrentTimeAnchor(loc, lastTime)))
+		if err := state.Set(s.timeHarness.awarenessInstructionKey, s.buildTimeAwarenessInstruction(loc, lastTime)); err != nil {
+			return nil, time.Time{}, err
+		}
 	}
 
-	return events, lastTime, nil
+	return history, lastTime, nil
 }
 
 func (s *SessionService) Get(ctx context.Context, req *adksession.GetRequest) (*adksession.GetResponse, error) {
-	sess := &zepSession{
+	sess := &session{
 		id:     req.SessionID,
 		userID: req.UserID,
 		app:    req.AppName,
+		state:  &state{m: make(map[string]any)},
 	}
 
-	events, lastTime, err := s.buildContext(ctx, req.SessionID, req.UserID)
+	events, lastTime, err := s.buildContext(ctx, req.SessionID, req.UserID, sess.state)
 	if err != nil {
 		return nil, err
 	}
@@ -689,6 +715,7 @@ func (s *SessionService) Delete(_ context.Context, _ *adksession.DeleteRequest) 
 }
 
 var (
-	_ threadClient = (*threadclient.Client)(nil)
-	_ userClient   = (*userclient.Client)(nil)
+	_ threadClient     = (*threadclient.Client)(nil)
+	_ userClient       = (*userclient.Client)(nil)
+	_ adksession.State = (*state)(nil)
 )

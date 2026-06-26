@@ -19,11 +19,26 @@ func main() {
 		option.WithAPIKey(os.Getenv("ZEP_API_KEY")),
 	)
 
-	// Set up the Session Service
+	// Set up the Session Service.
+	//
+	// WithMessageHistoryInstruction and WithAwarenessInstruction register
+	// the state keys that the ADK runner resolves into the agent's instruction
+	// string. Include the matching placeholders in your agent instruction:
+	//
+	//   ~ base instructions ~
+	//   {app:message-format-instruction?}
+	//   {temp:time-awareness-instruction?}
+	//
+	// app: scope is fixed after SessionService initialization.
+	// temp: scope is refreshed on every Get call (current time changes).
 	svc := zep.NewSessionService(
 		zepClient,
-		zep.WithMessagesHistoryLength(10),
-		zep.WithTimeHarness(zep.StaticZone("Asia/Jakarta")),
+		zep.WithMessageHistoryLength(10),
+		zep.WithMessageHistoryInstruction("app:message-format-instruction"),
+		zep.WithTimeHarness(
+			zep.StaticZone("Asia/Jakarta"),
+			zep.WithAwarenessInstruction("temp:time-awareness-instruction"),
+		),
 	)
 
 	// Set up the Memory Service. Long-term knowledge is user-scoped (independent

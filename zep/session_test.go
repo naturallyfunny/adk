@@ -49,10 +49,10 @@ func (fakeUser) Add(context.Context, *zepgo.CreateUserRequest, ...option.Request
 }
 
 // newTestService builds a SessionService with fake zep clients for testing.
-// agentName defaults to "Zee"; messagesHistoryLength defaults to 10.
+// msgHistoryLength defaults to 10.
 func newTestService(msgs []*zepgo.Message, opts ...Option) *SessionService {
 	s := &SessionService{
-		messagesHistoryLength: 10,
+		msgHistoryLength: 10,
 		threadClient: &fakeThread{
 			getResp: &zepgo.MessageListResponse{Messages: msgs},
 		},
@@ -64,26 +64,12 @@ func newTestService(msgs []*zepgo.Message, opts ...Option) *SessionService {
 	return s
 }
 
-// historyEvents returns events that are not system events (preamble/postamble/etc.).
+// historyEvents returns events that are not system events.
 func historyEvents(events []*adksession.Event) []*adksession.Event {
 	var out []*adksession.Event
 	for _, e := range events {
 		if e.Author != "system" {
 			out = append(out, e)
-		}
-	}
-	return out
-}
-
-// systemTexts returns the text content of all system events.
-func systemTexts(events []*adksession.Event) []string {
-	var out []string
-	for _, e := range events {
-		if e.Author != "system" {
-			continue
-		}
-		if e.LLMResponse.Content != nil && len(e.LLMResponse.Content.Parts) > 0 {
-			out = append(out, e.LLMResponse.Content.Parts[0].Text)
 		}
 	}
 	return out
@@ -98,10 +84,13 @@ func eventText(t *testing.T, e *adksession.Event) string {
 	return e.LLMResponse.Content.Parts[0].Text
 }
 
-// runBuildContext calls buildContext and fails the test on error.
+// newState returns a fresh state for test use.
+func newState() *state { return &state{m: make(map[string]any)} }
+
+// runBuildContext calls buildContext with a fresh state and fails the test on error.
 func runBuildContext(t *testing.T, svc *SessionService, ctx context.Context) []*adksession.Event {
 	t.Helper()
-	events, _, err := svc.buildContext(ctx, "test-session", "")
+	events, _, err := svc.buildContext(ctx, "test-session", "", newState())
 	if err != nil {
 		t.Fatalf("buildContext returned unexpected error: %v", err)
 	}
@@ -239,7 +228,7 @@ func TestHeader_FromContext_Missing_Errors(t *testing.T) {
 	}
 	svc := newTestService(msgs, WithTimeHarness(ZoneFromContext()))
 	// context has no timezone value
-	_, _, err := svc.buildContext(context.Background(), "test-session", "")
+	_, _, err := svc.buildContext(context.Background(), "test-session", "", newState())
 	if err == nil {
 		t.Fatal("expected error when timezone key absent, got nil")
 	}
@@ -260,7 +249,7 @@ func TestHeader_FromContext_InvalidTZ_Errors(t *testing.T) {
 	}
 	svc := newTestService(msgs, WithTimeHarness(ZoneFromContext()))
 	ctx := ContextWithTimezone(context.Background(), "Not/AValidZone")
-	_, _, err := svc.buildContext(ctx, "test-session", "")
+	_, _, err := svc.buildContext(ctx, "test-session", "", newState())
 	if err == nil {
 		t.Fatal("expected error for invalid timezone, got nil")
 	}
@@ -280,7 +269,7 @@ func TestHeader_TimeHarnessOn_BadTimestamp_Errors(t *testing.T) {
 		},
 	}
 	svc := newTestService(msgs, WithTimeHarness(nil))
-	_, _, err := svc.buildContext(context.Background(), "test-session", "")
+	_, _, err := svc.buildContext(context.Background(), "test-session", "", newState())
 	if err == nil {
 		t.Fatal("expected error for unparseable CreatedAt with TimeHarness on, got nil")
 	}
@@ -300,7 +289,7 @@ func TestHeader_TimeHarnessOff_BadTimestamp_NoError(t *testing.T) {
 		},
 	}
 	svc := newTestService(msgs) // no TimeHarness
-	events, _, err := svc.buildContext(context.Background(), "test-session", "")
+	events, _, err := svc.buildContext(context.Background(), "test-session", "", newState())
 	if err != nil {
 		t.Fatalf("expected no error with TimeHarness off and bad timestamp, got: %v", err)
 	}
@@ -353,21 +342,39 @@ func TestHeader_EmptyName_FallsBackToRole(t *testing.T) {
 	})
 }
 
-func TestEvents_EmptyHistory_NoPreambleNoPostamble(t *testing.T) {
-	svc := newTestService(nil) // empty message list
-	events := runBuildContext(t, svc, context.Background())
-
-	for _, text := range systemTexts(events) {
-		if strings.HasPrefix(text, "[MESSAGES_HISTORY_FORMAT]") {
-			t.Error("expected no format_preamble event for empty history")
-		}
-		if strings.HasPrefix(text, "[CRITICAL_FORMAT_REMINDER]") {
-			t.Error("expected no format_postamble event for empty history")
-		}
+func TestState_MessageFormatInstruction_NotSetWhenNoHistory(t *testing.T) {
+	svc := newTestService(nil, WithMessageHistoryInstruction("app:fmt"))
+	state := newState()
+	_, _, err := svc.buildContext(context.Background(), "test-session", "", state)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, err := state.Get("app:fmt"); err == nil {
+		t.Error("expected message format key to not be set when history is empty")
 	}
 }
 
-func TestEvents_CurrentTime_OnlyWhenHarnessOn(t *testing.T) {
+func TestState_MessageFormatInstruction_SetWhenHistoryPresent(t *testing.T) {
+	msgs := []*zepgo.Message{
+		{Role: zepgo.RoleTypeUserRole, Content: "hello", Name: ptr("Ian")},
+	}
+	svc := newTestService(msgs, WithMessageHistoryInstruction("app:fmt"))
+	state := newState()
+	_, _, err := svc.buildContext(context.Background(), "test-session", "", state)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	val, err := state.Get("app:fmt")
+	if err != nil {
+		t.Fatal("expected app:fmt key to be set, got error:", err)
+	}
+	text, _ := val.(string)
+	if !strings.HasPrefix(text, "[MESSAGES_HISTORY_FORMAT]") {
+		t.Errorf("expected [MESSAGES_HISTORY_FORMAT] prefix, got: %q", text)
+	}
+}
+
+func TestState_TimeAwarenessInstruction_OnlyWhenHarnessAndKeySet(t *testing.T) {
 	ts := "2026-05-17T12:00:00Z"
 	msgs := []*zepgo.Message{
 		{
@@ -378,36 +385,81 @@ func TestEvents_CurrentTime_OnlyWhenHarnessOn(t *testing.T) {
 		},
 	}
 
-	t.Run("harness_off_no_current_time", func(t *testing.T) {
-		svc := newTestService(msgs)
-		events := runBuildContext(t, svc, context.Background())
-		for _, text := range systemTexts(events) {
-			if strings.HasPrefix(text, "[CURRENT_TIME]") {
-				t.Error("current_time event must not be emitted when TimeHarness is off")
-			}
+	t.Run("harness_off_nothing_written", func(t *testing.T) {
+		svc := newTestService(msgs) // no time harness
+		state := newState()
+		if _, _, err := svc.buildContext(context.Background(), "test-session", "", state); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(state.m) != 0 {
+			t.Errorf("expected no state entries without time harness, got: %v", state.m)
 		}
 	})
 
-	t.Run("harness_on_has_current_time", func(t *testing.T) {
-		svc := newTestService(msgs, WithTimeHarness(nil))
-		events := runBuildContext(t, svc, context.Background())
-		found := false
-		for _, text := range systemTexts(events) {
-			if strings.HasPrefix(text, "[CURRENT_TIME]") {
-				found = true
-				break
-			}
+	t.Run("harness_on_no_key_nothing_written", func(t *testing.T) {
+		svc := newTestService(msgs, WithTimeHarness(nil)) // no WithAwarenessInstruction
+		state := newState()
+		if _, _, err := svc.buildContext(context.Background(), "test-session", "", state); err != nil {
+			t.Fatalf("unexpected error: %v", err)
 		}
-		if !found {
-			t.Error("expected current_time event when TimeHarness is on")
+		if len(state.m) != 0 {
+			t.Errorf("expected no state entries when instruction key not set, got: %v", state.m)
 		}
 	})
+
+	t.Run("harness_on_key_set", func(t *testing.T) {
+		svc := newTestService(msgs, WithTimeHarness(nil, WithAwarenessInstruction("temp:time")))
+		state := newState()
+		if _, _, err := svc.buildContext(context.Background(), "test-session", "", state); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		val, err := state.Get("temp:time")
+		if err != nil {
+			t.Fatal("expected temp:time key to be set, got error:", err)
+		}
+		text, _ := val.(string)
+		if !strings.HasPrefix(text, "[CURRENT_TIME]") {
+			t.Errorf("expected [CURRENT_TIME] prefix, got: %q", text)
+		}
+	})
+}
+
+func TestEvents_EmptyHistory_NoEventsReturned(t *testing.T) {
+	svc := newTestService(nil)
+	events := runBuildContext(t, svc, context.Background())
+	if len(events) != 0 {
+		t.Errorf("expected no events for empty history, got %d", len(events))
+	}
+}
+
+func TestEvents_OnlyHistoryEventsReturned(t *testing.T) {
+	ts := "2026-05-17T12:00:00Z"
+	msgs := []*zepgo.Message{
+		{
+			Role:      zepgo.RoleTypeUserRole,
+			Content:   "hello",
+			Name:      ptr("Ian"),
+			CreatedAt: ptr(ts),
+		},
+	}
+	// Even with all options, buildContext returns only history events.
+	svc := newTestService(msgs,
+		WithMessageHistoryInstruction("app:fmt"),
+		WithTimeHarness(nil, WithAwarenessInstruction("temp:time")),
+	)
+	events := runBuildContext(t, svc, context.Background())
+	if len(events) != 1 {
+		t.Fatalf("expected 1 history event (no system events), got %d", len(events))
+	}
+	if events[0].Author == "system" {
+		t.Error("expected no system events in returned event list")
+	}
 }
 
 func TestCurrentTime_WithLastTime_IncludesElapsed(t *testing.T) {
 	svc := &SessionService{}
 	lastTime := time.Now().Add(-90 * time.Minute)
-	result := svc.buildCurrentTimeAnchor(time.UTC, lastTime)
+	result := svc.buildTimeAwarenessInstruction(time.UTC, lastTime)
 
 	if !strings.Contains(result, "Time since previous message:") {
 		t.Errorf("expected elapsed line, got: %q", result)
@@ -419,7 +471,7 @@ func TestCurrentTime_WithLastTime_IncludesElapsed(t *testing.T) {
 
 func TestCurrentTime_NoLastTime_NoElapsed(t *testing.T) {
 	svc := &SessionService{}
-	result := svc.buildCurrentTimeAnchor(time.UTC, time.Time{})
+	result := svc.buildTimeAwarenessInstruction(time.UTC, time.Time{})
 
 	if strings.Contains(result, "Time since previous message:") {
 		t.Errorf("expected no elapsed line for zero lastTime, got: %q", result)
@@ -486,7 +538,7 @@ func addedName(t *testing.T, ft *fakeThread) string {
 func TestAppendEvent_UserName_DefaultsToUserID(t *testing.T) {
 	ft := &fakeThread{}
 	s := &SessionService{threadClient: ft, userClient: fakeUser{}}
-	sess := &zepSession{id: "sess", userID: "alice"}
+	sess := &session{id: "sess", userID: "alice"}
 
 	if err := s.AppendEvent(context.Background(), sess, userTextEvent("hi")); err != nil {
 		t.Fatalf("AppendEvent: %v", err)
@@ -500,7 +552,7 @@ func TestAppendEvent_UserName_StaticName(t *testing.T) {
 	ft := &fakeThread{}
 	s := &SessionService{threadClient: ft, userClient: fakeUser{}}
 	WithSpeakerResolver(StaticName("human"))(s)
-	sess := &zepSession{id: "sess", userID: "alice"}
+	sess := &session{id: "sess", userID: "alice"}
 
 	if err := s.AppendEvent(context.Background(), sess, userTextEvent("hi")); err != nil {
 		t.Fatalf("AppendEvent: %v", err)
@@ -514,7 +566,7 @@ func TestAppendEvent_UserName_NameFromContext(t *testing.T) {
 	ft := &fakeThread{}
 	s := &SessionService{threadClient: ft, userClient: fakeUser{}}
 	WithSpeakerResolver(NameFromContext())(s)
-	sess := &zepSession{id: "sess", userID: "alice"}
+	sess := &session{id: "sess", userID: "alice"}
 
 	ctx := ContextWithName(context.Background(), "ava")
 	if err := s.AppendEvent(ctx, sess, userTextEvent("hi")); err != nil {
@@ -529,7 +581,7 @@ func TestAppendEvent_UserName_NameFromContext_Missing_Errors(t *testing.T) {
 	ft := &fakeThread{}
 	s := &SessionService{threadClient: ft, userClient: fakeUser{}}
 	WithSpeakerResolver(NameFromContext())(s)
-	sess := &zepSession{id: "sess", userID: "alice"}
+	sess := &session{id: "sess", userID: "alice"}
 
 	if err := s.AppendEvent(context.Background(), sess, userTextEvent("hi")); err == nil {
 		t.Fatal("expected error for missing speaker context, got nil")
@@ -566,7 +618,7 @@ func TestCurrentTime_Anchor_ContainsFraming(t *testing.T) {
 	svc := &SessionService{}
 
 	t.Run("empty_thread", func(t *testing.T) {
-		result := svc.buildCurrentTimeAnchor(time.UTC, time.Time{})
+		result := svc.buildTimeAwarenessInstruction(time.UTC, time.Time{})
 		if !strings.Contains(result, "You are time-aware") {
 			t.Errorf("expected framing in empty-thread anchor, got: %q", result)
 		}
@@ -580,7 +632,7 @@ func TestCurrentTime_Anchor_ContainsFraming(t *testing.T) {
 
 	t.Run("non_empty_thread", func(t *testing.T) {
 		lastTime := time.Now().Add(-30 * time.Minute)
-		result := svc.buildCurrentTimeAnchor(time.UTC, lastTime)
+		result := svc.buildTimeAwarenessInstruction(time.UTC, lastTime)
 		if !strings.Contains(result, "You are time-aware") {
 			t.Errorf("expected framing in non-empty-thread anchor, got: %q", result)
 		}
@@ -606,8 +658,8 @@ func newOwnershipService(t *testing.T, ownerID string, msgs []*zepgo.Message, ge
 		}
 	}
 	s := &SessionService{
-		messagesHistoryLength: 10,
-		threadClient:          &fakeThread{getResp: resp, getErr: getErr},
+		msgHistoryLength: 10,
+		threadClient:     &fakeThread{getResp: resp, getErr: getErr},
 		userClient:            fakeUser{},
 	}
 	for _, opt := range opts {
@@ -695,9 +747,9 @@ func TestOwnership_VerifyOnlyPath_StillRejected(t *testing.T) {
 	msgs := []*zepgo.Message{
 		{Role: zepgo.RoleTypeUserRole, Content: "secret", Name: ptr("Alice")},
 	}
-	// messagesHistoryLength == 0 → the verify-only Get path. The guard must run
+	// msgHistoryLength == 0 → the verify-only Get path. The guard must run
 	// before the early return.
-	svc := newOwnershipService(t, "alice", msgs, nil, WithMessagesHistoryLength(0))
+	svc := newOwnershipService(t, "alice", msgs, nil, WithMessageHistoryLength(0))
 
 	_, err := svc.Get(context.Background(), ownerGetRequest("bob"))
 	if !errors.Is(err, ErrSessionOwnerMismatch) {
@@ -718,7 +770,7 @@ func createRequest(userID string) *adksession.CreateRequest {
 // reject without ever creating the thread.
 func TestOwnership_Create_ForeignThread_Rejected(t *testing.T) {
 	ft := &fakeThread{getResp: &zepgo.MessageListResponse{UserID: ptr("alice")}}
-	svc := &SessionService{messagesHistoryLength: 10, threadClient: ft, userClient: fakeUser{}}
+	svc := &SessionService{msgHistoryLength: 10, threadClient: ft, userClient: fakeUser{}}
 
 	_, err := svc.Create(context.Background(), createRequest("bob"))
 	if !errors.Is(err, ErrSessionOwnerMismatch) {
@@ -733,7 +785,7 @@ func TestOwnership_Create_ForeignThread_Rejected(t *testing.T) {
 // path: the thread does not exist (NotFound), so Create proceeds.
 func TestOwnership_Create_NewThread_Succeeds(t *testing.T) {
 	ft := &fakeThread{getErr: &zepgo.NotFoundError{}}
-	svc := &SessionService{messagesHistoryLength: 10, threadClient: ft, userClient: fakeUser{}}
+	svc := &SessionService{msgHistoryLength: 10, threadClient: ft, userClient: fakeUser{}}
 
 	resp, err := svc.Create(context.Background(), createRequest("bob"))
 	if err != nil {
@@ -751,7 +803,7 @@ func TestOwnership_Create_NewThread_Succeeds(t *testing.T) {
 // thread is allowed.
 func TestOwnership_Create_OwnedBySelf_Succeeds(t *testing.T) {
 	ft := &fakeThread{getResp: &zepgo.MessageListResponse{UserID: ptr("alice")}}
-	svc := &SessionService{messagesHistoryLength: 10, threadClient: ft, userClient: fakeUser{}}
+	svc := &SessionService{msgHistoryLength: 10, threadClient: ft, userClient: fakeUser{}}
 
 	_, err := svc.Create(context.Background(), createRequest("alice"))
 	if err != nil {
@@ -759,104 +811,5 @@ func TestOwnership_Create_OwnedBySelf_Succeeds(t *testing.T) {
 	}
 	if ft.createCalls != 1 {
 		t.Errorf("expected thread.Create to be called once, got %d", ft.createCalls)
-	}
-}
-
-func TestSessionInstruction_EmittedWhenSet(t *testing.T) {
-	svc := newTestService(nil, WithSessionInstruction("You are a customer support agent."))
-	events := runBuildContext(t, svc, context.Background())
-
-	texts := systemTexts(events)
-	found := false
-	for _, text := range texts {
-		if text == "You are a customer support agent." {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("expected session instruction in system events, got: %v", texts)
-	}
-}
-
-func TestSessionInstruction_NotEmittedWhenEmpty(t *testing.T) {
-	svc := newTestService(nil) // no WithSessionInstruction
-	events := runBuildContext(t, svc, context.Background())
-
-	for _, text := range systemTexts(events) {
-		if text == "" {
-			t.Error("unexpected empty system event")
-		}
-	}
-	// More importantly: no session_instruction event should be emitted at all.
-	// With no messages and no options, there should be zero events.
-	if len(events) != 0 {
-		t.Errorf("expected no events for empty session with no options, got %d", len(events))
-	}
-}
-
-func TestSessionInstruction_IsFirstEvent(t *testing.T) {
-	ts := "2026-05-17T05:57:00Z"
-	msgs := []*zepgo.Message{
-		{
-			Role:      zepgo.RoleTypeUserRole,
-			Content:   "hello",
-			Name:      ptr("Ian"),
-			CreatedAt: ptr(ts),
-		},
-	}
-	svc := newTestService(msgs, WithSessionInstruction("session context here"), WithTimeHarness(StaticZone("Asia/Jakarta")))
-	events := runBuildContext(t, svc, context.Background())
-
-	// Expected: session_instruction, preamble, history, postamble, current_time
-	if len(events) != 5 {
-		t.Fatalf("expected 5 events, got %d", len(events))
-	}
-	if events[0].Author != "system" || eventText(t, events[0]) != "session context here" {
-		t.Errorf("position 0 should be session_instruction, got author=%q text=%q",
-			events[0].Author, eventText(t, events[0]))
-	}
-}
-
-func TestEvents_Order_PreambleHistoryPostambleCurrentTime(t *testing.T) {
-	ts := "2026-05-17T05:57:00Z"
-	msgs := []*zepgo.Message{
-		{
-			Role:      zepgo.RoleTypeUserRole,
-			Content:   "hello",
-			Name:      ptr("Ian"),
-			CreatedAt: ptr(ts),
-		},
-	}
-	svc := newTestService(msgs, WithTimeHarness(StaticZone("Asia/Jakarta")))
-	events := runBuildContext(t, svc, context.Background())
-
-	// Expected sequence: preamble, history, postamble, current_time
-	if len(events) != 4 {
-		t.Fatalf("expected 4 events, got %d", len(events))
-	}
-
-	// 0: preamble
-	if events[0].Author != "system" ||
-		!strings.HasPrefix(eventText(t, events[0]), "[MESSAGES_HISTORY_FORMAT]") {
-		t.Errorf("position 0 should be preamble, got author=%q text=%q",
-			events[0].Author, eventText(t, events[0]))
-	}
-	// 1: history (non-system)
-	if events[1].Author == "system" {
-		t.Errorf("position 1 should be history (non-system), got system event: %q",
-			eventText(t, events[1]))
-	}
-	// 2: postamble
-	if events[2].Author != "system" ||
-		!strings.HasPrefix(eventText(t, events[2]), "[CRITICAL_FORMAT_REMINDER]") {
-		t.Errorf("position 2 should be postamble, got author=%q text=%q",
-			events[2].Author, eventText(t, events[2]))
-	}
-	// 3: current_time
-	if events[3].Author != "system" ||
-		!strings.HasPrefix(eventText(t, events[3]), "[CURRENT_TIME]") {
-		t.Errorf("position 3 should be current_time, got author=%q text=%q",
-			events[3].Author, eventText(t, events[3]))
 	}
 }

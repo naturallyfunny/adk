@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,8 +27,7 @@ type ZoneResolver struct {
 }
 
 type timeHarnessConfig struct {
-	zoneResolver            *ZoneResolver
-	awarenessInstructionKey string
+	zoneResolver *ZoneResolver
 }
 
 // SpeakerResolver resolves the display name attributed to inbound user-role turns.
@@ -124,11 +124,13 @@ func WithSpeakerResolver(speaker *SpeakerResolver) Option {
 	}
 }
 
-// WithMessageHistoryInstruction registers the state key under which the message
-// format instruction is written during Get. The consumer includes {key?} (or
-// {key}) in their agent instruction for the placeholder to be resolved by the
-// ADK runner. When not set, no instruction is written to state.
-func WithMessageHistoryInstruction(key string) Option {
+// WithInstruction registers the state key under which a combined session
+// instruction block is written during Get. The block includes a message format
+// section whenever history is present, and a current-time section when the time
+// harness is enabled. The consumer includes {key?} (or {key}) in their agent
+// instruction for the placeholder to be resolved by the ADK runner. When not
+// set, no instruction is written to state.
+func WithInstruction(key string) Option {
 	return func(s *SessionService) {
 		s.instructionKey = key
 	}
@@ -182,9 +184,6 @@ func ZoneFromContext() *ZoneResolver {
 	}
 }
 
-// TimeHarnessOpt configures optional behaviour within WithTimeHarness.
-type TimeHarnessOpt func(*timeHarnessConfig)
-
 // WithTimeHarness enables time-awareness using the provided zone source.
 // A nil zone enables time-awareness without timezone conversion; timestamps are
 // formatted in their parsed timezone, and the current-time anchor uses UTC.
@@ -192,26 +191,12 @@ type TimeHarnessOpt func(*timeHarnessConfig)
 // When enabled:
 //   - History message prefix becomes [YYYY-MM-DD HH:MM Name] instead of [Name]
 //   - Any message with unparseable CreatedAt causes Get to return an error
-func WithTimeHarness(zone *ZoneResolver, opts ...TimeHarnessOpt) Option {
+func WithTimeHarness(zone *ZoneResolver) Option {
 	if zone != nil && zone.resolve == nil {
 		panic("zep: WithTimeHarness: zone must be created by StaticZone or ZoneFromContext")
 	}
 	return func(s *SessionService) {
-		cfg := &timeHarnessConfig{zoneResolver: zone}
-		for _, opt := range opts {
-			opt(cfg)
-		}
-		s.timeHarness = cfg
-	}
-}
-
-// WithAwarenessInstruction registers the state key under which the
-// current-time instruction block is written during Get. The consumer includes
-// {key?} (or {key}) in their agent instruction for the placeholder to be
-// resolved by the ADK runner. When not set, no instruction is written to state.
-func WithAwarenessInstruction(key string) TimeHarnessOpt {
-	return func(c *timeHarnessConfig) {
-		c.awarenessInstructionKey = key
+		s.timeHarness = &timeHarnessConfig{zoneResolver: zone}
 	}
 }
 
@@ -662,25 +647,36 @@ func (s *SessionService) buildTimeAwarenessInstruction(loc *time.Location, lastT
 	)
 }
 
+func (s *SessionService) buildInstruction(ctx context.Context, hasHistory bool, lastTime time.Time) (string, error) {
+	var parts []string
+	if hasHistory {
+		parts = append(parts, s.buildMessageFormatInstruction())
+	}
+	if s.timeHarnessEnabled() {
+		loc, err := s.resolveLocation(ctx)
+		if err != nil {
+			return "", err
+		}
+		parts = append(parts, s.buildTimeAwarenessInstruction(loc, lastTime))
+	}
+	return strings.Join(parts, "\n\n"), nil
+}
+
 func (s *SessionService) buildContext(ctx context.Context, sessionID, expectedUserID string, state *state) ([]*adksession.Event, time.Time, error) {
 	history, lastTime, err := s.fetchHistory(ctx, sessionID, expectedUserID)
 	if err != nil {
 		return nil, time.Time{}, err
 	}
 
-	if len(history) > 0 && s.instructionKey != "" {
-		if err := state.Set(s.instructionKey, s.buildMessageFormatInstruction()); err != nil {
-			return nil, time.Time{}, err
-		}
-	}
-
-	if s.timeHarnessEnabled() && s.timeHarness.awarenessInstructionKey != "" {
-		loc, err := s.resolveLocation(ctx)
+	if s.instructionKey != "" {
+		instruction, err := s.buildInstruction(ctx, len(history) > 0, lastTime)
 		if err != nil {
 			return nil, time.Time{}, err
 		}
-		if err := state.Set(s.timeHarness.awarenessInstructionKey, s.buildTimeAwarenessInstruction(loc, lastTime)); err != nil {
-			return nil, time.Time{}, err
+		if instruction != "" {
+			if err := state.Set(s.instructionKey, instruction); err != nil {
+				return nil, time.Time{}, err
+			}
 		}
 	}
 

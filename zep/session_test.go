@@ -343,7 +343,7 @@ func TestHeader_EmptyName_FallsBackToRole(t *testing.T) {
 }
 
 func TestState_MessageFormatInstruction_NotSetWhenNoHistory(t *testing.T) {
-	svc := newTestService(nil, WithMessageHistoryInstruction("app:fmt"))
+	svc := newTestService(nil, WithInstruction("app:fmt"))
 	state := newState()
 	_, _, err := svc.buildContext(context.Background(), "test-session", "", state)
 	if err != nil {
@@ -358,7 +358,7 @@ func TestState_MessageFormatInstruction_SetWhenHistoryPresent(t *testing.T) {
 	msgs := []*zepgo.Message{
 		{Role: zepgo.RoleTypeUserRole, Content: "hello", Name: ptr("Ian")},
 	}
-	svc := newTestService(msgs, WithMessageHistoryInstruction("app:fmt"))
+	svc := newTestService(msgs, WithInstruction("app:fmt"))
 	state := newState()
 	_, _, err := svc.buildContext(context.Background(), "test-session", "", state)
 	if err != nil {
@@ -397,7 +397,7 @@ func TestState_TimeAwarenessInstruction_OnlyWhenHarnessAndKeySet(t *testing.T) {
 	})
 
 	t.Run("harness_on_no_key_nothing_written", func(t *testing.T) {
-		svc := newTestService(msgs, WithTimeHarness(nil)) // no WithAwarenessInstruction
+		svc := newTestService(msgs, WithTimeHarness(nil)) // no WithInstruction key
 		state := newState()
 		if _, _, err := svc.buildContext(context.Background(), "test-session", "", state); err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -408,7 +408,7 @@ func TestState_TimeAwarenessInstruction_OnlyWhenHarnessAndKeySet(t *testing.T) {
 	})
 
 	t.Run("harness_on_key_set", func(t *testing.T) {
-		svc := newTestService(msgs, WithTimeHarness(nil, WithAwarenessInstruction("temp:time")))
+		svc := newTestService(msgs, WithInstruction("temp:time"), WithTimeHarness(nil))
 		state := newState()
 		if _, _, err := svc.buildContext(context.Background(), "test-session", "", state); err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -418,8 +418,8 @@ func TestState_TimeAwarenessInstruction_OnlyWhenHarnessAndKeySet(t *testing.T) {
 			t.Fatal("expected temp:time key to be set, got error:", err)
 		}
 		text, _ := val.(string)
-		if !strings.HasPrefix(text, "[CURRENT_TIME]") {
-			t.Errorf("expected [CURRENT_TIME] prefix, got: %q", text)
+		if !strings.Contains(text, "[CURRENT_TIME]") {
+			t.Errorf("expected [CURRENT_TIME] section in combined instruction, got: %q", text)
 		}
 	})
 }
@@ -444,8 +444,8 @@ func TestEvents_OnlyHistoryEventsReturned(t *testing.T) {
 	}
 	// Even with all options, buildContext returns only history events.
 	svc := newTestService(msgs,
-		WithMessageHistoryInstruction("app:fmt"),
-		WithTimeHarness(nil, WithAwarenessInstruction("temp:time")),
+		WithInstruction("app:ctx"),
+		WithTimeHarness(nil),
 	)
 	events := runBuildContext(t, svc, context.Background())
 	if len(events) != 1 {

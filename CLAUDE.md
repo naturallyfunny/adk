@@ -46,21 +46,19 @@ the type of the second field goes above that, and so on.
 
 ```go
 // SessionService dependency fields in order: threadClient, userClient,
-// speakerResolver, knowledgeHarness, timeHarness (builtin scalars omitted).
+// speakerResolver, timeHarness (builtin scalars omitted).
 // So nearest → farthest matches that order in reverse:
 
-type ZoneResolver struct { ... }           // used by timeHarnessConfig (field 7's value-source)
-type timeHarnessConfig struct { ... }      // field 7: timeHarness *timeHarnessConfig
-type knowledgeHarnessConfig struct { ... } // field 6: knowledgeHarness *knowledgeHarnessConfig
-type SpeakerResolver struct { ... }        // field 3: speakerResolver *SpeakerResolver
-type userClient interface { ... }          // field 2: userClient userClient
-type threadClient interface { ... }        // field 1: threadClient threadClient  ← nearest
+type ZoneResolver struct { ... }       // used by timeHarnessConfig (field 4's value-source)
+type timeHarnessConfig struct { ... }  // field 4: timeHarness *timeHarnessConfig
+type SpeakerResolver struct { ... }    // field 3: speakerResolver *SpeakerResolver
+type userClient interface { ... }      // field 2: userClient userClient
+type threadClient interface { ... }    // field 1: threadClient threadClient  ← nearest
 type SessionService struct {
     threadClient     threadClient
     userClient       userClient
     speakerResolver  *SpeakerResolver
-    // … builtin scalars (messagesHistoryLength, sessionInstruction) …
-    knowledgeHarness *knowledgeHarnessConfig
+    // … builtin scalars (msgHistoryLength, instructionKey) …
     timeHarness      *timeHarnessConfig
 }
 ```
@@ -85,10 +83,18 @@ consumes them:
 ```go
 func NewSessionService(...) *SessionService { ... }
 
-func WithKnowledgeContext(...) Option { ... }
+func WithMessageHistoryLength(n int) Option { ... }
+
+// Speaker name helpers come here, just before WithSpeakerResolver.
+func StaticName(name string) *SpeakerResolver { ... }
+func NameFromContext() *SpeakerResolver { ... }
+
+func WithSpeakerResolver(speaker *SpeakerResolver) Option { ... }
+
+func WithInstruction(key string) Option { ... }
 
 // Zone helpers come here, just before WithTimeHarness.
-func StaticZone(...) *ZoneResolver { ... }
+func StaticZone(timezone string) *ZoneResolver { ... }
 func ZoneFromContext() *ZoneResolver { ... }
 
 func WithTimeHarness(zone *ZoneResolver) Option { ... }
@@ -141,10 +147,30 @@ speaker, it resolves one.
 
 ### Optional read-path features → `Harness`
 
-A feature that injects system events into the prompt context on the read path
-(`buildContext`/`Get`) is a `…Harness` (`timeHarness`, `knowledgeHarness`). Back
-it with a `…HarnessConfig` pointer when it needs two distinct nil levels: `nil` =
-disabled, vs non-nil with a nil inner value = enabled with a default (e.g.
-`WithTimeHarness(nil)`, `WithKnowledgeContext(nil)` are both real states). A plain
-value source that needs no such second level (a `*Resolver`) is not a harness and
-takes no wrapper — symmetry there would only add an empty layer.
+A feature that writes framing blocks into session State under consumer-provided
+keys on the read path (`buildContext`/`Get`) is a `…Harness` (`timeHarness`).
+The consumer includes `{key?}` placeholders in their agent instruction; the ADK
+runner resolves them at call time. Enabling or disabling a harness feature does
+not require touching the agent instruction — set or omit the key.
+
+Back a harness with a `…HarnessConfig` pointer when it needs two distinct nil
+levels: `nil` = disabled, vs non-nil with a nil inner value = enabled with a
+default (e.g. `WithTimeHarness(nil)` is a real state). A plain value source that
+needs no such second level (a `*Resolver`) is not a harness and takes no wrapper
+— symmetry there would only add an empty layer.
+
+When a harness has internal options, use a `…HarnessOpt` function type rather
+than additional top-level `Option` functions. This keeps harness-specific
+configuration scoped to where the harness is configured:
+
+```go
+type TimeHarnessOpt func(*timeHarnessConfig)
+
+func WithTimeHarness(zone *ZoneResolver, opts ...TimeHarnessOpt) Option { ... }
+func WithSomeHarnessDetail(v string) TimeHarnessOpt { ... }
+```
+
+Note: the state key that instruction blocks are written under is a top-level
+concern (`WithInstruction`), not a harness concern. Use `…HarnessOpt` only for
+configuration that is truly internal to one harness and has no meaning outside
+it.

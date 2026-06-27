@@ -202,7 +202,7 @@ func TestHeader_FromContext_OK(t *testing.T) {
 		},
 	}
 	svc := newTestService(msgs, WithTimeHarness(ZoneFromContext()))
-	ctx := ContextWithTimezone(context.Background(), "Asia/Jakarta")
+	ctx := WithTimezone(context.Background(), "Asia/Jakarta")
 	events := runBuildContext(t, svc, ctx)
 
 	hist := historyEvents(events)
@@ -248,7 +248,7 @@ func TestHeader_FromContext_InvalidTZ_Errors(t *testing.T) {
 		},
 	}
 	svc := newTestService(msgs, WithTimeHarness(ZoneFromContext()))
-	ctx := ContextWithTimezone(context.Background(), "Not/AValidZone")
+	ctx := WithTimezone(context.Background(), "Not/AValidZone")
 	_, _, err := svc.buildContext(ctx, "test-session", "", newState())
 	if err == nil {
 		t.Fatal("expected error for invalid timezone, got nil")

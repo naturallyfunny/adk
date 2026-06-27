@@ -160,14 +160,14 @@ func StaticZone(timezone string) *ZoneResolver {
 
 type timezoneContextKey struct{}
 
-// ContextWithTimezone returns a child context carrying an IANA timezone string
+// WithTimezone returns a child context carrying an IANA timezone string
 // for ZoneFromContext.
-func ContextWithTimezone(ctx context.Context, timezone string) context.Context {
+func WithTimezone(ctx context.Context, timezone string) context.Context {
 	return context.WithValue(ctx, timezoneContextKey{}, timezone)
 }
 
 // ZoneFromContext configures the time harness to resolve the timezone from the
-// request context. Use ContextWithTimezone to provide the timezone per request.
+// request context. Use WithTimezone to provide the timezone per request.
 func ZoneFromContext() *ZoneResolver {
 	return &ZoneResolver{
 		resolve: func(ctx context.Context) (*time.Location, error) {

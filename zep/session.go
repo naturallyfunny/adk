@@ -30,7 +30,7 @@ type timeHarnessConfig struct {
 	zoneResolver *ZoneResolver
 }
 
-// SpeakerResolver resolves the display name attributed to inbound user-role turns.
+// SpeakerResolver resolves the speaker name attributed to inbound user-role turns.
 // Use StaticName or NameFromContext to create one.
 type SpeakerResolver struct {
 	resolve func(context.Context) (string, error)
@@ -78,7 +78,7 @@ func WithMessageHistoryLength(n int) Option {
 	}
 }
 
-// StaticName returns a speaker resolver backed by a fixed display name. An empty
+// StaticName returns a speaker resolver backed by a fixed speaker name. An empty
 // name means inbound user turns fall back to the session's UserID.
 func StaticName(name string) *SpeakerResolver {
 	return &SpeakerResolver{
@@ -90,14 +90,14 @@ func StaticName(name string) *SpeakerResolver {
 
 type nameContextKey struct{}
 
-// ContextWithName returns a child context carrying the display name for
+// WithSpeakerName returns a child context carrying the speaker name for
 // NameFromContext.
-func ContextWithName(ctx context.Context, name string) context.Context {
+func WithSpeakerName(ctx context.Context, name string) context.Context {
 	return context.WithValue(ctx, nameContextKey{}, name)
 }
 
 // NameFromContext returns a speaker resolver that reads the inbound user-turn
-// display name from the request context. Use ContextWithName to provide the name
+// speaker name from the request context. Use WithSpeakerName to provide the name
 // per request. AppendEvent returns an error when the name is absent or empty, so
 // a forgotten context does not silently mislabel the turn.
 func NameFromContext() *SpeakerResolver {

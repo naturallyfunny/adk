@@ -568,7 +568,7 @@ func TestAppendEvent_UserName_NameFromContext(t *testing.T) {
 	WithSpeakerResolver(NameFromContext())(s)
 	sess := &session{id: "sess", userID: "alice"}
 
-	ctx := ContextWithName(context.Background(), "ava")
+	ctx := WithSpeakerName(context.Background(), "ava")
 	if err := s.AppendEvent(ctx, sess, userTextEvent("hi")); err != nil {
 		t.Fatalf("AppendEvent: %v", err)
 	}

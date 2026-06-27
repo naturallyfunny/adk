@@ -390,6 +390,9 @@ func (s *SessionService) AppendEvent(ctx context.Context, sess adksession.Sessio
 	// visible even though they carry no text and are not persisted to Zep.
 	if impl, ok := sess.(*session); ok {
 		impl.events = append(impl.events, event)
+		for k, v := range event.Actions.StateDelta {
+			_ = impl.state.Set(k, v)
+		}
 	}
 
 	var contentStr string

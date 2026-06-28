@@ -23,7 +23,7 @@ Prefer this shape:
 6. Internal helpers needed by the next public method.
 7. The public method that uses those helpers.
 8. Repeat helper-before-caller ordering for the rest of the file.
-9. Compile-time interface assertions at the bottom.
+9. Compile-time interface assertions inline, immediately after the type they guard.
 
 When choosing between two possible placements, put the dependency nearest to the
 first code block that makes the reader need to understand it. Avoid layouts that
@@ -49,7 +49,7 @@ the type of the second field goes above that, and so on.
 // speakerResolver, timeHarness (builtin scalars omitted).
 // So nearest → farthest matches that order in reverse:
 
-type ZoneResolver struct { ... }       // used by timeHarnessConfig (field 4's value-source)
+type TZResolver struct { ... }         // used by timeHarnessConfig (field 4's value-source)
 type timeHarnessConfig struct { ... }  // field 4: timeHarness *timeHarnessConfig
 type SpeakerResolver struct { ... }    // field 3: speakerResolver *SpeakerResolver
 type userClient interface { ... }      // field 2: userClient userClient
@@ -85,19 +85,19 @@ func NewSessionService(...) *SessionService { ... }
 
 func WithMessageHistoryLength(n int) Option { ... }
 
-// Speaker name helpers come here, just before WithSpeakerResolver.
-func StaticName(name string) *SpeakerResolver { ... }
-func NameFromContext() *SpeakerResolver { ... }
+// Speaker helpers come here, just before WithSpeakerResolver.
+func Static(sp Speaker) *SpeakerResolver { ... }
+func SpeakerFromContext() *SpeakerResolver { ... }
 
-func WithSpeakerResolver(speaker *SpeakerResolver) Option { ... }
+func WithSpeakerResolver(r *SpeakerResolver) Option { ... }
 
 func WithInstruction(key string) Option { ... }
 
-// Zone helpers come here, just before WithTimeHarness.
-func StaticZone(timezone string) *ZoneResolver { ... }
-func ZoneFromContext() *ZoneResolver { ... }
+// TZ helpers come here, just before WithTimeHarness.
+func StaticTZ(tz string) *TZResolver { ... }
+func TZFromContext() *TZResolver { ... }
 
-func WithTimeHarness(zone *ZoneResolver) Option { ... }
+func WithTimeHarness(zone *TZResolver) Option { ... }
 ```
 
 Do not place them before the constructor simply because they return a type that
@@ -124,19 +124,25 @@ that is fine in Go.
 
 A type whose whole job is to produce one value — possibly from `context`,
 possibly fallibly — is a behavior, so name it with the agent-noun suffix
-`Resolver` (`ZoneResolver`, `SpeakerResolver`), as the standard library does
+`Resolver` (`TZResolver`, `SpeakerResolver`), as the standard library does
 (`net.Resolver`). It is *not* the value it yields: a `SpeakerResolver` is not a
 speaker, it resolves one.
 
 - Construct it through fluent factories named for the **value it yields**, not
-  the resolver type or the mechanism: a `ZoneResolver` yields a zone, so
-  `StaticZone`/`ZoneFromContext`; a `SpeakerResolver` yields a name, so
-  `StaticName`/`NameFromContext`. Name the factory after the value, never repeat
-  the resolver/option word, or the option DSL stutters. Compare
-  `WithSpeakerResolver(NameFromContext())` (clean) with
-  `WithSpeakerResolver(SpeakerFromContext())` (Speaker…Speaker). This mirrors how
-  `WithTimeHarness(StaticZone(...))` reads — option word (`Time`) ≠ value word
-  (`Zone`).
+  the resolver type or the mechanism: a `TZResolver` yields a timezone, so
+  `StaticTZ`/`TZFromContext`; a `SpeakerResolver` yields a `Speaker`, so
+  `Static`/`SpeakerFromContext`. Name the factory after the value, never repeat
+  the resolver/option word where avoidable, or the option DSL stutters. Compare
+  `WithTimeHarness(StaticTZ(...))` (clean) — option word (`Time`) ≠ value word
+  (`TZ`).
+- When multiple resolver types share a package, bare factory names like `Static`
+  or `FromContext` can collide. Assign the short form to whichever type's value
+  name works naturally as a bare word (`Static(sp Speaker)` for `SpeakerResolver`).
+  The other type must carry a prefix (`StaticTZ`, `TZFromContext`). For no-arg
+  `FromContext` factories, both types need a prefix since they'd have identical
+  signatures without one (`SpeakerFromContext`, `TZFromContext`). Accept partial
+  stutter (`WithSpeakerResolver(SpeakerFromContext())`) when the alternative is a
+  package-level name collision.
 - Keep the resolver opaque: an unexported
   `resolve func(context.Context) (T, error)` field forces construction through
   the factories (and lets a `With*` option panic on a zero `&XResolver{}`).
@@ -166,7 +172,7 @@ configuration scoped to where the harness is configured:
 ```go
 type TimeHarnessOpt func(*timeHarnessConfig)
 
-func WithTimeHarness(zone *ZoneResolver, opts ...TimeHarnessOpt) Option { ... }
+func WithTimeHarness(zone *TZResolver, opts ...TimeHarnessOpt) Option { ... }
 func WithSomeHarnessDetail(v string) TimeHarnessOpt { ... }
 ```
 

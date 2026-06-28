@@ -35,7 +35,7 @@ func main() {
 		zepClient,
 		zep.WithMessageHistoryLength(10),
 		zep.WithInstruction("temp:session-instruction"),
-		zep.WithTimeHarness(zep.StaticZone("Asia/Jakarta")),
+		zep.WithTimeHarness(zep.StaticTZ("Asia/Jakarta")),
 	)
 
 	// Set up the Memory Service. Long-term knowledge is user-scoped (independent

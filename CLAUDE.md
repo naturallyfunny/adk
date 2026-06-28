@@ -86,7 +86,7 @@ func NewSessionService(...) *SessionService { ... }
 func WithMessageHistoryLength(n int) Option { ... }
 
 // Speaker helpers come here, just before WithSpeakerResolver.
-func Static(sp Speaker) *SpeakerResolver { ... }
+func StaticSpeaker(sp Speaker) *SpeakerResolver { ... }
 func SpeakerFromContext() *SpeakerResolver { ... }
 
 func WithSpeakerResolver(r *SpeakerResolver) Option { ... }
@@ -131,18 +131,9 @@ speaker, it resolves one.
 - Construct it through fluent factories named for the **value it yields**, not
   the resolver type or the mechanism: a `TZResolver` yields a timezone, so
   `StaticTZ`/`TZFromContext`; a `SpeakerResolver` yields a `Speaker`, so
-  `Static`/`SpeakerFromContext`. Name the factory after the value, never repeat
-  the resolver/option word where avoidable, or the option DSL stutters. Compare
-  `WithTimeHarness(StaticTZ(...))` (clean) — option word (`Time`) ≠ value word
-  (`TZ`).
-- When multiple resolver types share a package, bare factory names like `Static`
-  or `FromContext` can collide. Assign the short form to whichever type's value
-  name works naturally as a bare word (`Static(sp Speaker)` for `SpeakerResolver`).
-  The other type must carry a prefix (`StaticTZ`, `TZFromContext`). For no-arg
-  `FromContext` factories, both types need a prefix since they'd have identical
-  signatures without one (`SpeakerFromContext`, `TZFromContext`). Accept partial
-  stutter (`WithSpeakerResolver(SpeakerFromContext())`) when the alternative is a
-  package-level name collision.
+  `StaticSpeaker`/`SpeakerFromContext`. Prefix consistently within each type so
+  all factories for the same resolver carry the same value-word prefix.
+  Compare `WithTimeHarness(StaticTZ(...))` (clean) — option word (`Time`) ≠ value word (`TZ`).
 - Keep the resolver opaque: an unexported
   `resolve func(context.Context) (T, error)` field forces construction through
   the factories (and lets a `With*` option panic on a zero `&XResolver{}`).

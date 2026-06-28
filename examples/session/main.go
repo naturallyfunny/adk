@@ -22,7 +22,7 @@ func main() {
 	)
 
 	// Context carrying the user's timezone (typically set by HTTP middleware)
-	ctx := zep.ContextWithTimezone(context.Background(), "Asia/Jakarta")
+	ctx := zep.WithTimezone(context.Background(), "Asia/Jakarta")
 
 	resp, _ := svc.Get(ctx, &adksession.GetRequest{
 		SessionID: "session-789",

@@ -39,7 +39,7 @@ type Speaker struct {
 }
 
 // SpeakerResolver resolves the Speaker attributed to inbound user-role turns.
-// Use Static or SpeakerFromContext to create one.
+// Use StaticSpeaker or SpeakerFromContext to create one.
 type SpeakerResolver struct {
 	resolve func(context.Context) (Speaker, error)
 }
@@ -88,10 +88,10 @@ func WithMessageHistoryLength(n int) Option {
 	}
 }
 
-// Static returns a speaker resolver backed by a fixed Speaker value.
+// StaticSpeaker returns a speaker resolver backed by a fixed Speaker value.
 // An empty Name means inbound user turns fall back to the session's UserID.
 // An empty Role keeps the ADK-derived role unchanged.
-func Static(sp Speaker) *SpeakerResolver {
+func StaticSpeaker(sp Speaker) *SpeakerResolver {
 	return &SpeakerResolver{
 		resolve: func(context.Context) (Speaker, error) {
 			return sp, nil
@@ -127,7 +127,7 @@ func SpeakerFromContext() *SpeakerResolver {
 // attributed to the session's UserID.
 func WithSpeakerResolver(r *SpeakerResolver) Option {
 	if r == nil || r.resolve == nil {
-		panic("zep: WithSpeakerResolver: resolver must be created by Static or SpeakerFromContext")
+		panic("zep: WithSpeakerResolver: resolver must be created by StaticSpeaker or SpeakerFromContext")
 	}
 	return func(s *SessionService) {
 		s.speakerResolver = r

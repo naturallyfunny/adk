@@ -73,6 +73,68 @@ type Option func(*SessionService)   // encountered first → nearest
 func NewSessionService(..., opts ...Option) *SessionService { ... }
 ```
 
+#### Functions with nested closures
+
+When the block is a function containing multiple nested closures (e.g. a
+`Tools()`-style constructor with one closure per `functiontool.New(...)`
+call), first split the local types each closure needs into two kinds:
+
+- **Domain view types** — a type with its own `toXView` converter, shaped by
+  a domain concept (a message, an event, a contact) rather than by one tool's
+  call signature. These stay **package-level**, grouped at the very top of
+  the file (view type immediately followed by its converter), even if only
+  one tool currently uses them. They are the stable JSON contract the model
+  sees, not plumbing — worth keeping visible and reusable regardless of
+  current call-site count.
+- **Tool-specific args/output wrapper types** — a type that exists only to
+  satisfy one `functiontool.New(...)` call's `TArgs`/`TResults` and carries no
+  domain meaning of its own (`getEventsArgs`, `msgsOutput`, `ack`). Go
+  permits `type` declarations inside a function body — use that to declare
+  these **locally, immediately above the `functiontool.New(...)` call that
+  uses them**, scoped to nothing wider than the tool that needs them. Do not
+  hoist them to package level just because they're structs.
+
+Within one tool's pair of local declarations, apply the same first-encountered
+rule as elsewhere: the closure signature reads `func(toolCtx adktool.Context,
+in XArgs) (XOutput, error)`, so `XArgs` is encountered first — it goes
+**nearest** (immediately above the call). `XOutput` is encountered second — it
+goes **farther** (declared first, above `XArgs`).
+
+```go
+// msgView/toMsgView are the reusable domain view — package level, top of
+// file. readMsgsArgs/msgsOutput and sendEmailArgs/ack exist only for their
+// one respective tool call — local to GmailTools, each pair output-then-args
+// (args nearest the call it belongs to):
+
+type msgView struct { ... }
+func toMsgView(m gworkspace.Message) msgView { ... }
+
+type GmailClient interface { ... }
+
+func GmailTools(c GmailClient) ([]adktool.Tool, error) {
+    if c == nil { ... }
+
+    type msgsOutput struct { ... }
+    type readMsgsArgs struct { ... }
+    readMsgs, err := functiontool.New(
+        functiontool.Config{...},
+        func(toolCtx adktool.Context, in readMsgsArgs) (msgsOutput, error) { ... },
+    )
+    if err != nil { ... }
+
+    type ack struct { ... }
+    type sendEmailArgs struct { ... }
+    sendEmail, err := functiontool.New(
+        functiontool.Config{...},
+        func(toolCtx adktool.Context, in sendEmailArgs) (ack, error) { ... },
+    )
+    ...
+}
+```
+
+Do not default to a fixed template (e.g. "interface first, then args, then
+output types") — derive the order from the actual read path every time.
+
 ### Exported helpers that produce option values
 
 Functions like `StaticZone` or `ZoneFromContext` that exist to produce a value

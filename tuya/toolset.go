@@ -51,7 +51,7 @@ type deviceView struct {
 
 // accountView reports the human's linked Tuya account.
 type accountView struct {
-	OwnerID string `json:"owner_id"`
+	Owner   string `json:"owner"`
 	TuyaUID string `json:"tuya_uid"`
 }
 
@@ -106,7 +106,7 @@ WHAT I GET BACK:
 			if err != nil {
 				return accountView{}, forAgent(err)
 			}
-			return accountView{OwnerID: acc.OwnerID, TuyaUID: acc.TuyaUID}, nil
+			return accountView{Owner: acc.Owner, TuyaUID: acc.TuyaUID}, nil
 		},
 	)
 	if err != nil {

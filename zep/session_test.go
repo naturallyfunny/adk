@@ -178,7 +178,7 @@ func TestHeader_StaticJakarta(t *testing.T) {
 			CreatedAt: ptr(ts),
 		},
 	}
-	svc := newTestService(msgs, WithTimeHarness(StaticZone("Asia/Jakarta")))
+	svc := newTestService(msgs, WithTimeHarness(StaticTZ("Asia/Jakarta")))
 	events := runBuildContext(t, svc, context.Background())
 
 	hist := historyEvents(events)
@@ -201,7 +201,7 @@ func TestHeader_FromContext_OK(t *testing.T) {
 			CreatedAt: ptr(ts),
 		},
 	}
-	svc := newTestService(msgs, WithTimeHarness(ZoneFromContext()))
+	svc := newTestService(msgs, WithTimeHarness(TZFromContext()))
 	ctx := WithTimezone(context.Background(), "Asia/Jakarta")
 	events := runBuildContext(t, svc, ctx)
 
@@ -226,7 +226,7 @@ func TestHeader_FromContext_Missing_Errors(t *testing.T) {
 			CreatedAt: ptr(ts),
 		},
 	}
-	svc := newTestService(msgs, WithTimeHarness(ZoneFromContext()))
+	svc := newTestService(msgs, WithTimeHarness(TZFromContext()))
 	// context has no timezone value
 	_, _, err := svc.buildContext(context.Background(), "test-session", "", newState())
 	if err == nil {
@@ -247,7 +247,7 @@ func TestHeader_FromContext_InvalidTZ_Errors(t *testing.T) {
 			CreatedAt: ptr(ts),
 		},
 	}
-	svc := newTestService(msgs, WithTimeHarness(ZoneFromContext()))
+	svc := newTestService(msgs, WithTimeHarness(TZFromContext()))
 	ctx := WithTimezone(context.Background(), "Not/AValidZone")
 	_, _, err := svc.buildContext(ctx, "test-session", "", newState())
 	if err == nil {
@@ -487,16 +487,16 @@ func TestConstruction_InvalidTimezone_Panics(t *testing.T) {
 			t.Fatal("expected panic for invalid timezone, got none")
 		}
 	}()
-	NewSessionService(nil, WithTimeHarness(StaticZone("Foo/Bar")))
+	NewSessionService(nil, WithTimeHarness(StaticTZ("Foo/Bar")))
 }
 
 func TestConstruction_ZeroZone_Panics(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {
-			t.Fatal("expected panic for zero ZoneResolver, got none")
+			t.Fatal("expected panic for zero TZResolver, got none")
 		}
 	}()
-	NewSessionService(nil, WithTimeHarness(&ZoneResolver{}))
+	NewSessionService(nil, WithTimeHarness(&TZResolver{}))
 }
 
 func TestConstruction_NilSpeaker_Panics(t *testing.T) {
@@ -548,10 +548,10 @@ func TestAppendEvent_UserName_DefaultsToUserID(t *testing.T) {
 	}
 }
 
-func TestAppendEvent_UserName_StaticName(t *testing.T) {
+func TestAppendEvent_UserName_StaticSpeaker(t *testing.T) {
 	ft := &fakeThread{}
 	s := &SessionService{threadClient: ft, userClient: fakeUser{}}
-	WithSpeakerResolver(StaticName("human"))(s)
+	WithSpeakerResolver(StaticSpeaker(Speaker{Name: "human"}))(s)
 	sess := &session{id: "sess", userID: "alice"}
 
 	if err := s.AppendEvent(context.Background(), sess, userTextEvent("hi")); err != nil {
@@ -562,13 +562,13 @@ func TestAppendEvent_UserName_StaticName(t *testing.T) {
 	}
 }
 
-func TestAppendEvent_UserName_NameFromContext(t *testing.T) {
+func TestAppendEvent_UserName_SpeakerFromContext(t *testing.T) {
 	ft := &fakeThread{}
 	s := &SessionService{threadClient: ft, userClient: fakeUser{}}
-	WithSpeakerResolver(NameFromContext())(s)
+	WithSpeakerResolver(SpeakerFromContext())(s)
 	sess := &session{id: "sess", userID: "alice"}
 
-	ctx := WithSpeakerName(context.Background(), "ava")
+	ctx := WithSpeaker(context.Background(), Speaker{Name: "ava"})
 	if err := s.AppendEvent(ctx, sess, userTextEvent("hi")); err != nil {
 		t.Fatalf("AppendEvent: %v", err)
 	}
@@ -577,10 +577,10 @@ func TestAppendEvent_UserName_NameFromContext(t *testing.T) {
 	}
 }
 
-func TestAppendEvent_UserName_NameFromContext_Missing_Errors(t *testing.T) {
+func TestAppendEvent_UserName_SpeakerFromContext_Missing_Errors(t *testing.T) {
 	ft := &fakeThread{}
 	s := &SessionService{threadClient: ft, userClient: fakeUser{}}
-	WithSpeakerResolver(NameFromContext())(s)
+	WithSpeakerResolver(SpeakerFromContext())(s)
 	sess := &session{id: "sess", userID: "alice"}
 
 	if err := s.AppendEvent(context.Background(), sess, userTextEvent("hi")); err == nil {
@@ -660,7 +660,7 @@ func newOwnershipService(t *testing.T, ownerID string, msgs []*zepgo.Message, ge
 	s := &SessionService{
 		msgHistoryLength: 10,
 		threadClient:     &fakeThread{getResp: resp, getErr: getErr},
-		userClient:            fakeUser{},
+		userClient:       fakeUser{},
 	}
 	for _, opt := range opts {
 		opt(s)

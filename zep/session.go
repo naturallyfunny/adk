@@ -49,6 +49,7 @@ type userClient interface {
 	Get(ctx context.Context, userID string, opts ...option.RequestOption) (*zep.User, error)
 	Add(ctx context.Context, request *zep.CreateUserRequest, opts ...option.RequestOption) (*zep.User, error)
 }
+
 var _ userClient = (*userclient.Client)(nil)
 
 // threadClient is the slice of zep thread functionality this service needs.
@@ -57,6 +58,7 @@ type threadClient interface {
 	AddMessages(ctx context.Context, threadID string, request *zep.AddThreadMessagesRequest, opts ...option.RequestOption) (*zep.AddThreadMessagesResponse, error)
 	Get(ctx context.Context, threadID string, request *zep.ThreadGetRequest, opts ...option.RequestOption) (*zep.MessageListResponse, error)
 }
+
 var _ threadClient = (*threadclient.Client)(nil)
 
 type SessionService struct {

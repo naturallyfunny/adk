@@ -40,7 +40,7 @@ func TestToolsNames(t *testing.T) {
 	want := []string{
 		"search_tracks", "my_playlists", "playlist_tracks",
 		"now_playing", "my_devices",
-		"play", "pause", "skip_next", "skip_previous", "set_volume",
+		"play", "transfer_playback", "pause", "skip_next", "skip_previous", "set_volume",
 	}
 	if len(tools) != len(want) {
 		t.Errorf("tool count = %d, want %d", len(tools), len(want))

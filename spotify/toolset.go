@@ -60,8 +60,14 @@ type playlistTracksArgs struct {
 }
 
 type playArgs struct {
-	URI      string `json:"uri"`
+	URI        string `json:"uri"`
+	ContextURI string `json:"context_uri"`
+	DeviceID   string `json:"device_id"`
+}
+
+type transferPlaybackArgs struct {
 	DeviceID string `json:"device_id"`
+	Play     bool   `json:"play"`
 }
 
 type setVolumeArgs struct {
@@ -227,15 +233,62 @@ HOW TO USE:
 - uri: the Spotify uri of what to play. A track uri plays that one song; an
   album, artist, or playlist uri plays the whole thing. Leave uri empty to
   resume whatever is already loaded — that's how I un-pause.
-- device_id: leave empty to use the active device. Set it (from my_devices)
-  to start playback somewhere specific.
-- No active device? Spotify can't place the sound; ask the human to open
-  Spotify somewhere, or check my_devices.
+- context_uri: an album/playlist/artist to play WITHIN. Set this together with
+  a track uri when the human picks a track that came from a playlist (or album)
+  and wants skip next/previous to stay inside it: pass the playlist as
+  context_uri and the track as uri. Playback starts at that track but keeps the
+  playlist as context. Leave context_uri empty for a plain single track or to
+  play a whole thing.
+- device_id: leave empty to use the active device. Set it (from my_devices) to
+  start playback on a specific device.
+- No active device? Don't give up and don't ask the human yet. Call my_devices:
+  if it lists ANY available device, retry play with that device's device_id —
+  an available device can be idle and still be targeted, no human action needed.
+  Only ask the human to open Spotify when my_devices comes back empty. To move an
+  already-playing session onto an idle device while keeping its queue/position,
+  prefer transfer_playback.
 
 Premium-only, like all playback control.`,
 		},
 		func(toolCtx adktool.Context, in playArgs) (ack, error) {
-			if err := c.Play(toolCtx, toolCtx.UserID(), in.DeviceID, in.URI); err != nil {
+			req := spotify.PlayRequest{
+				DeviceID:   in.DeviceID,
+				ContextURI: in.ContextURI,
+				URI:        in.URI,
+			}
+			if err := c.Play(toolCtx, toolCtx.UserID(), req); err != nil {
+				return ack{}, forAgent(err)
+			}
+			return ack{OK: true}, nil
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	transferPlayback, err := functiontool.New(
+		functiontool.Config{
+			Name: "transfer_playback",
+			Description: `Move the current playback session onto another device, carrying the queue and
+position across. How I wake an idle device without restarting the music.
+
+WHEN TO USE:
+- The human asks to move the music to another device ("play this on the living
+  room speaker instead")
+- A session is loaded but sitting on a device I want to hand off, keeping right
+  where it is — unlike play, this doesn't start fresh content
+
+HOW TO USE:
+- device_id: the target device from my_devices. It only has to be available
+  (open somewhere); it can be idle and still receive the session.
+- play: true to make sure it's playing after the move, false to keep the current
+  play/pause state.
+
+To start specific new content on a device instead, use play with its device_id.
+Premium-only, like all playback control.`,
+		},
+		func(toolCtx adktool.Context, in transferPlaybackArgs) (ack, error) {
+			if err := c.TransferPlayback(toolCtx, toolCtx.UserID(), in.DeviceID, in.Play); err != nil {
 				return ack{}, forAgent(err)
 			}
 			return ack{OK: true}, nil
@@ -334,6 +387,7 @@ HOW TO USE:
 		nowPlaying,
 		myDevices,
 		play,
+		transferPlayback,
 		pause,
 		skipNext,
 		skipPrevious,

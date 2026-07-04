@@ -175,8 +175,8 @@ go.naturallyfunny.dev/gworkspace v0.4.0 h1:52q84080SaPQNRb7BjNiYICPdY0yuv12cG7+w
 go.naturallyfunny.dev/gworkspace v0.4.0/go.mod h1:36Gi7GzhmdwHw5Or42TygkLxz/iPbddRpfo8zzOOEgs=
 go.naturallyfunny.dev/postera v0.18.0 h1:fvC7sOoYX6fWUR8hk19Ts2/j0lw0wAUgNiWvDz52unc=
 go.naturallyfunny.dev/postera v0.18.0/go.mod h1:eghaqCsdszrpGcR0tY0HcPzla+g4ZF+ItJ7EOQ5ttQk=
-go.naturallyfunny.dev/spotify v0.1.0 h1:AQmRFAFIc4XcTU3UCVezK3Pp74jV08ffoCXj/mcwiaM=
-go.naturallyfunny.dev/spotify v0.1.0/go.mod h1:cmupuJLwPbP0ER5eCykJy4mdTIJoJdZS/BMPSmwoNAg=
+go.naturallyfunny.dev/spotify v0.5.0 h1:gsOK2oEvrSDT3T5kg1L3TRbjRtqqmkNUpz7Fnl087QQ=
+go.naturallyfunny.dev/spotify v0.5.0/go.mod h1:ZXKhUK13qmgPx8vec2SnXTCT0U8piS77jmoI3dpO+t0=
 go.naturallyfunny.dev/tuya v0.5.0 h1:vl30xLVNIcicC5vPcYfQpfbnC83BzQ+ObrJDPGHSZAA=
 go.naturallyfunny.dev/tuya v0.5.0/go.mod h1:WoVgXT3s3XpOKijQiFmGuKoc3rFnLB9bAEh5QBnqOHg=
 go.opencensus.io v0.21.0/go.mod h1:mSImk1erAIZhrmZN+AvHh14ztQfjbGwt4TtuofqLduU=

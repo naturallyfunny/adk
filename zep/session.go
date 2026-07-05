@@ -628,31 +628,19 @@ func (s *SessionService) fetchHistory(ctx context.Context, sessionID, expectedUs
 func (s *SessionService) buildMessageFormatInstruction() string {
 	if s.timeHarnessEnabled() {
 		return `[MESSAGES_HISTORY_FORMAT]
-Each history message is shown as:
-
-  [YYYY-MM-DD HH:MM Name] raw message content
-
-The bracketed prefix is metadata the system adds to identify the speaker and
-the message's local time. Timestamps are already in local time, so never
-reason about timezones. The prefix is NOT part of the message and NOT
-something a speaker typed.
-
-IMPORTANT: The system adds this same prefix to YOUR reply too. So never write
-a prefix yourself — no leading bracket, no name, no timestamp. Emit raw
-content only; a reply that begins with "[" is wrong.
+Incoming message history will be shown as: [YYYY-MM-DD HH:MM Name] {raw message content}
+IMPORTANT AND CRITICAL:
+- The bracketed prefix is metadata the system adds to identify the speaker and the message's local timem, and is NOT part of the message and NOT something a speaker typed.
+- I as an agent should never write a prefix ([YYYY-MM-DD HH:MM Name]) — no leading bracket, no name, no timestamp. My response as an agent should be raw message content only.
+- Timestamps are already in local time, so I as an agent should never reason about timezones.
 [/MESSAGES_HISTORY_FORMAT]`
 	}
 	return `[MESSAGES_HISTORY_FORMAT]
-Each history message is shown as:
-
-  [Name] raw message content
-
-The bracketed prefix is metadata the system adds to identify the speaker. It
-is NOT part of the message and NOT something a speaker typed.
-
-IMPORTANT: The system adds this same prefix to YOUR reply too. So never write
-a prefix yourself — no leading bracket, no name. Emit raw content only; a
-reply that begins with "[" is wrong.
+Each history message is shown as: [Name] raw message content
+IMPORTANT AND CRITICAL:
+- The bracketed prefix is metadata the system adds to identify the speaker. It is NOT part of the message and NOT something a speaker typed.
+IMPORTANT: 
+- I as an agent should never write a prefix ([Name]) — no leading bracket, no name, no timestamp. My response as an agent should be raw message content only.
 [/MESSAGES_HISTORY_FORMAT]`
 }
 

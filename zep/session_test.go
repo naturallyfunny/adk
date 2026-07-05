@@ -826,6 +826,34 @@ func TestOwnership_Create_NewThread_Succeeds(t *testing.T) {
 	}
 }
 
+// TestCreate_SeedsInstructionState covers the AutoCreateSession first-turn path:
+// the session Create hands to the runner must already carry the instruction
+// state, so a non-optional {instructionKey} placeholder resolves on the very
+// first message of a brand-new thread instead of erroring the whole turn.
+func TestCreate_SeedsInstructionState(t *testing.T) {
+	ft := &fakeThread{getErr: &zepgo.NotFoundError{}}
+	svc := &SessionService{
+		msgHistoryLength: 10,
+		threadClient:     ft,
+		userClient:       fakeUser{},
+		instructionKey:   "temp:sess",
+		timeHarness:      &timeHarnessConfig{}, // harness on, UTC anchor
+	}
+
+	resp, err := svc.Create(context.Background(), createRequest("bob"))
+	if err != nil {
+		t.Fatalf("Create returned unexpected error: %v", err)
+	}
+	val, err := resp.Session.State().Get("temp:sess")
+	if err != nil {
+		t.Fatalf("instruction key not seeded on created session: %v", err)
+	}
+	text, _ := val.(string)
+	if !strings.Contains(text, "[CURRENT_TIME]") {
+		t.Errorf("expected time-awareness in created session instruction, got: %q", text)
+	}
+}
+
 // TestOwnership_Create_OwnedBySelf_Succeeds: re-creating one's own existing
 // thread is allowed.
 func TestOwnership_Create_OwnedBySelf_Succeeds(t *testing.T) {

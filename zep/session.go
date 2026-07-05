@@ -374,14 +374,24 @@ func (s *SessionService) Create(ctx context.Context, req *adksession.CreateReque
 	}); err != nil {
 		return nil, fmt.Errorf("zep create thread: %w", err)
 	}
-	return &adksession.CreateResponse{
-		Session: &session{
-			id:     req.SessionID,
-			userID: req.UserID,
-			app:    req.AppName,
-			state:  &state{m: make(map[string]any)},
-		},
-	}, nil
+	sess := &session{
+		id:     req.SessionID,
+		userID: req.UserID,
+		app:    req.AppName,
+		state:  &state{m: make(map[string]any)},
+	}
+	// Seed the session instruction on the create path too, not just Get. The ADK
+	// runner calls Create (with AutoCreateSession) for the first turn on a brand-
+	// new thread; the session it hands back must carry the same instruction state
+	// a fetched session would, or a non-optional {instructionKey} placeholder in
+	// the agent instruction fails to resolve and the whole first turn errors out.
+	// A brand-new thread has no history and no prior timestamp, so build with
+	// hasHistory=false and a zero lastTime — the same values Get uses for an
+	// empty thread.
+	if err := s.applyInstruction(ctx, sess.state, false, time.Time{}); err != nil {
+		return nil, err
+	}
+	return &adksession.CreateResponse{Session: sess}, nil
 }
 
 // isBlank reports whether s carries no persistable content — i.e. it renders
@@ -712,24 +722,34 @@ func (s *SessionService) buildInstruction(ctx context.Context, hasHistory bool, 
 	return strings.Join(parts, "\n\n"), nil
 }
 
+// applyInstruction writes the combined session instruction into st under the
+// configured key. It is the single point both session entry points funnel
+// through — buildContext (the fetched path, from Get) and Create (the auto-
+// create path) — so the instruction placeholder resolves identically regardless
+// of which produced the session. No-op when no key is registered or the built
+// instruction is empty (nothing to inject).
+func (s *SessionService) applyInstruction(ctx context.Context, st *state, hasHistory bool, lastTime time.Time) error {
+	if s.instructionKey == "" {
+		return nil
+	}
+	instruction, err := s.buildInstruction(ctx, hasHistory, lastTime)
+	if err != nil {
+		return err
+	}
+	if instruction == "" {
+		return nil
+	}
+	return st.Set(s.instructionKey, instruction)
+}
+
 func (s *SessionService) buildContext(ctx context.Context, sessionID, expectedUserID string, state *state) ([]*adksession.Event, time.Time, error) {
 	history, lastTime, err := s.fetchHistory(ctx, sessionID, expectedUserID)
 	if err != nil {
 		return nil, time.Time{}, err
 	}
-
-	if s.instructionKey != "" {
-		instruction, err := s.buildInstruction(ctx, len(history) > 0, lastTime)
-		if err != nil {
-			return nil, time.Time{}, err
-		}
-		if instruction != "" {
-			if err := state.Set(s.instructionKey, instruction); err != nil {
-				return nil, time.Time{}, err
-			}
-		}
+	if err := s.applyInstruction(ctx, state, len(history) > 0, lastTime); err != nil {
+		return nil, time.Time{}, err
 	}
-
 	return history, lastTime, nil
 }
 

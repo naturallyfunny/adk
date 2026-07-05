@@ -592,9 +592,13 @@ func TestAppendEvent_TextlessEvent_NotPersisted(t *testing.T) {
 	nilContent := adksession.NewEvent("inv")
 	nilContent.Author = "assistant"
 	cases := map[string]*adksession.Event{
-		"nil content":     nilContent,
-		"empty string":    userTextEvent(""),
-		"whitespace only": userTextEvent("  \n\t "),
+		"nil content":      nilContent,
+		"empty string":     userTextEvent(""),
+		"whitespace only":  userTextEvent("  \n\t "),
+		"zero width space": userTextEvent("\u200b"),
+		"ltr mark":         userTextEvent("\u200e"),
+		"bom":              userTextEvent("\ufeff"),
+		"mixed invisible":  userTextEvent(" \u200b\u200e\n"),
 	}
 	for name, evt := range cases {
 		t.Run(name, func(t *testing.T) {

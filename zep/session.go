@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/getzep/zep-go/v3"
 	"github.com/getzep/zep-go/v3/client"
@@ -383,6 +384,27 @@ func (s *SessionService) Create(ctx context.Context, req *adksession.CreateReque
 	}, nil
 }
 
+// isBlank reports whether s carries no persistable content — i.e. it renders
+// visually empty. Beyond ASCII/Unicode whitespace it also ignores zero-width
+// and bidirectional formatting runes (Unicode category Cf: e.g. U+200B
+// ZERO WIDTH SPACE, U+200E LEFT-TO-RIGHT MARK, U+FEFF) and control runes. A
+// model that is asked for — or that reflexively emits — an "empty" turn may
+// return one of these invisible characters rather than a truly empty string;
+// unicode.IsSpace alone would let it through and pollute the thread with a
+// blank message. The invariant stays content-driven: no visible content, no
+// Zep message.
+func isBlank(s string) bool {
+	for _, r := range s {
+		switch {
+		case unicode.IsSpace(r), unicode.IsControl(r), unicode.Is(unicode.Cf, r):
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func (s *SessionService) roleFromADK(role string) zep.RoleType {
 	switch role {
 	case "user", "human":
@@ -418,11 +440,11 @@ func (s *SessionService) AppendEvent(ctx context.Context, sess adksession.Sessio
 		}
 	}
 	// A textless event yields no Zep message. Function calls, function
-	// responses, and empty (or whitespace-only) model turns carry nothing to
-	// persist to a text thread, so they are dropped rather than written as
-	// blank messages. In-memory state above is already updated, so the ADK
-	// flow loop still sees them.
-	if strings.TrimSpace(contentStr) == "" {
+	// responses, and empty model turns carry nothing to persist to a text
+	// thread, so they are dropped rather than written as blank messages. In-
+	// memory state above is already updated, so the ADK flow loop still sees
+	// them.
+	if isBlank(contentStr) {
 		return nil
 	}
 

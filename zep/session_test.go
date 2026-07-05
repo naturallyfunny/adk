@@ -588,6 +588,29 @@ func TestAppendEvent_UserName_SpeakerFromContext_Missing_Errors(t *testing.T) {
 	}
 }
 
+func TestAppendEvent_TextlessEvent_NotPersisted(t *testing.T) {
+	nilContent := adksession.NewEvent("inv")
+	nilContent.Author = "assistant"
+	cases := map[string]*adksession.Event{
+		"nil content":     nilContent,
+		"empty string":    userTextEvent(""),
+		"whitespace only": userTextEvent("  \n\t "),
+	}
+	for name, evt := range cases {
+		t.Run(name, func(t *testing.T) {
+			ft := &fakeThread{}
+			s := &SessionService{threadClient: ft, userClient: fakeUser{}}
+			sess := &session{id: "sess", userID: "alice"}
+			if err := s.AppendEvent(context.Background(), sess, evt); err != nil {
+				t.Fatalf("AppendEvent: %v", err)
+			}
+			if ft.addReq != nil {
+				t.Fatalf("expected no message persisted, got %+v", ft.addReq)
+			}
+		})
+	}
+}
+
 func TestFormatElapsed_Buckets(t *testing.T) {
 	cases := []struct {
 		d    time.Duration

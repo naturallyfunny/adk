@@ -417,7 +417,12 @@ func (s *SessionService) AppendEvent(ctx context.Context, sess adksession.Sessio
 			}
 		}
 	}
-	if contentStr == "" {
+	// A textless event yields no Zep message. Function calls, function
+	// responses, and empty (or whitespace-only) model turns carry nothing to
+	// persist to a text thread, so they are dropped rather than written as
+	// blank messages. In-memory state above is already updated, so the ADK
+	// flow loop still sees them.
+	if strings.TrimSpace(contentStr) == "" {
 		return nil
 	}
 
